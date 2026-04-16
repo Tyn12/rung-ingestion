@@ -46,8 +46,8 @@ DATASET_PAGES: list[str] = [
 
 RAW_ROOT = Path("data/raw/hmrc_paye")
 
-# Minimum gap between HTTP calls.
-MIN_GAP = 1.0
+# Minimum gap between HTTP calls (generous to avoid ONS 429s).
+MIN_GAP = 2.0
 _last: float = 0.0
 
 
@@ -59,17 +59,24 @@ def _throttle() -> None:
     _last = time.monotonic()
 
 
+class _Retriable(Exception):
+    """Wraps transient HTTP errors so tenacity retries them."""
+    pass
+
+
 @retry(
     reraise=True,
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=2, min=2, max=30),
-    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout)),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=3, min=3, max=60),
+    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout, _Retriable)),
 )
 def _get(url: str, **kwargs) -> requests.Response:
     _throttle()
     resp = requests.get(url, timeout=60, **kwargs)
+    if resp.status_code == 429:
+        raise _Retriable(f"ONS 429 Too Many Requests for {url}")
     if 500 <= resp.status_code < 600:
-        raise requests.ConnectionError(f"ONS 5xx: {resp.status_code}")
+        raise _Retriable(f"ONS {resp.status_code} for {url}")
     resp.raise_for_status()
     return resp
 
@@ -111,8 +118,13 @@ def fetch_latest(output_root: Path = RAW_ROOT, today: Optional[date] = None) -> 
             xlsx_rels = _discover_xlsx_links(resp.text)
             for rel in xlsx_rels:
                 full = rel if rel.startswith("http") else urljoin(_ONS_BASE, rel)
-                if not _is_example_file(full):
-                    all_urls.append(full)
+                if _is_example_file(full):
+                    continue
+                # Skip historical editions — only keep the current one.
+                # Previous editions live under .../current/previous/vNN/file.xlsx
+                if "/previous/" in full.lower():
+                    continue
+                all_urls.append(full)
         except Exception as e:  # noqa: BLE001
             print(f"[hmrc_paye:fetch] Warning: could not scrape {page_url}: {e}")
 

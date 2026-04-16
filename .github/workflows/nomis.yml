@@ -58,15 +58,24 @@ jobs:
 
       - name: Run Nomis ingestion
         run: |
-          ARGS="--dataset ${{ github.event.inputs.dataset || 'NM_99_1' }}"
+          DATASET="${{ github.event.inputs.dataset || 'NM_99_1' }}"
+          EXTRA=""
           if [ -n "${{ github.event.inputs.years }}" ]; then
-            ARGS="$ARGS --years ${{ github.event.inputs.years }}"
+            EXTRA="$EXTRA --years ${{ github.event.inputs.years }}"
           fi
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+            EXTRA="$EXTRA --dry-run"
           fi
-          echo "Running: python -m ingestion.nomis.run $ARGS"
-          python -m ingestion.nomis.run $ARGS
+          echo "Running: python -m ingestion.nomis.run --dataset $DATASET $EXTRA"
+          python -m ingestion.nomis.run --dataset "$DATASET" $EXTRA || {
+            echo "Primary dataset $DATASET failed or returned 0 rows."
+            if [ "$DATASET" = "NM_99_1" ]; then
+              echo "Falling back to legacy dataset NM_30_1..."
+              python -m ingestion.nomis.run --dataset NM_30_1 $EXTRA
+            else
+              exit 1
+            fi
+          }
 
       - name: Upload raw data artifact
         if: always()

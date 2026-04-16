@@ -95,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
 
     written = load(observations)
     print(f"[nomis:run] Upserted {written} observations into compensation_observations.")
+    if written == 0 and not args.dry_run:
+        print("[nomis:run] WARNING: 0 observations written — check API parameters.")
+        return 1
     return 0
 
 

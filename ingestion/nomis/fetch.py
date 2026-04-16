@@ -116,56 +116,75 @@ def fetch_data(
 ) -> Path:
     """Fetch ASHE data as CSV for the given years and occupations.
 
-    If `years` is None, tries 'latest', then falls back to explicit recent years.
-    If `occupations` is None, fetches all available occupation codes.
+    Tries multiple parameter strategies to handle differences between
+    NM_99_1 (SOC 2020) and NM_30_1 (SOC 2010) dimension structures.
 
     Returns the path to the raw CSV dump.
     """
     geo_param = ",".join(UK_REGION_GEOGRAPHIES.keys())
-    occ_param = ",".join(occupations) if occupations else "0...9999"
+    current_year = date.today().year
 
-    # Build date parameter: prefer explicit years for reliability, 'latest' as default
+    # Build date parameter
     if years:
         date_param = ",".join(str(y) for y in years)
     else:
         date_param = "latest"
 
-    base_params = {
-        "geography": geo_param,
-        "sex": ",".join(str(s) for s in SEX_CODES),
-        "item": ",".join(str(i) for i in PAY_ITEMS),
-        "pay": ",".join(str(p) for p in PAY_MEASURES),
-        "measures": ",".join(str(m) for m in MEASURES),
-        "occupation": occ_param,
-        "select": "DATE_NAME,GEOGRAPHY_CODE,GEOGRAPHY_NAME,SEX_NAME,ITEM_NAME,ITEM_CODE,PAY_NAME,OCCUPATION_CODE,OCCUPATION_NAME,OBS_VALUE,OBS_STATUS_NAME",
-    }
-
     url = f"{NOMIS_BASE}/dataset/{dataset_id}.data.csv"
     out = _data_dir(dataset_id) / f"data_{date.today().isoformat()}.csv"
 
-    # Try date=latest first, then fall back to explicit recent years
-    attempts = [date_param]
-    if date_param == "latest":
-        # Also try explicit years as fallback — 'latest' is unreliable for some datasets
-        current_year = date.today().year
-        attempts.append(",".join(str(y) for y in range(current_year - 3, current_year + 1)))
+    # Nomis datasets have inconsistent dimension names. We try multiple
+    # parameter strategies, from most-specific to least-specific.
+    occ_param = ",".join(occupations) if occupations else "0...9999"
 
-    for attempt in attempts:
-        params = {**base_params, "date": attempt}
-        print(f"[nomis] Fetching {dataset_id} CSV for date={attempt}, occupations={occ_param[:40]}...")
-        resp = _get(url, params=params)
+    date_options = [date_param]
+    if date_param == "latest":
+        date_options.append(",".join(str(y) for y in range(current_year - 3, current_year + 1)))
+
+    strategies = []
+    for d in date_options:
+        # Strategy 1: full parameters with occupation range
+        strategies.append({
+            "date": d, "geography": geo_param,
+            "sex": ",".join(str(s) for s in SEX_CODES),
+            "item": ",".join(str(i) for i in PAY_ITEMS),
+            "pay": ",".join(str(p) for p in PAY_MEASURES),
+            "measures": ",".join(str(m) for m in MEASURES),
+            "occupation": occ_param,
+            "select": "DATE_NAME,GEOGRAPHY_CODE,GEOGRAPHY_NAME,SEX_NAME,ITEM_NAME,ITEM_CODE,PAY_NAME,OCCUPATION_CODE,OCCUPATION_NAME,OBS_VALUE,OBS_STATUS_NAME",
+        })
+        # Strategy 2: without explicit occupation (let API return all)
+        strategies.append({
+            "date": d, "geography": geo_param,
+            "sex": ",".join(str(s) for s in SEX_CODES),
+            "item": ",".join(str(i) for i in PAY_ITEMS),
+            "pay": ",".join(str(p) for p in PAY_MEASURES),
+            "measures": ",".join(str(m) for m in MEASURES),
+            "select": "DATE_NAME,GEOGRAPHY_CODE,GEOGRAPHY_NAME,SEX_NAME,ITEM_NAME,ITEM_CODE,PAY_NAME,OCCUPATION_CODE,OCCUPATION_NAME,OBS_VALUE,OBS_STATUS_NAME",
+        })
+
+    for i, params in enumerate(strategies, 1):
+        desc = f"date={params['date']}, occ={'all' if 'occupation' not in params else params['occupation'][:30]}"
+        print(f"[nomis] Strategy {i}/{len(strategies)}: {dataset_id} CSV ({desc})...")
+        try:
+            resp = _get(url, params=params)
+        except Exception as e:
+            print(f"[nomis] Strategy {i} failed: {e}")
+            continue
         n_rows = resp.text.count("\n") - 1
 
         if n_rows > 0:
             out.write_text(resp.text, encoding="utf-8")
-            print(f"[nomis] Wrote {n_rows} rows to {out}")
+            print(f"[nomis] Success: {n_rows} rows written to {out}")
             return out
         else:
-            print(f"[nomis] date={attempt} returned 0 data rows, trying next...")
+            print(f"[nomis] Strategy {i} returned 0 data rows.")
 
-    # If all attempts returned 0 rows, save the last response anyway for debugging
+    # Last resort: save empty + print the CSV header for debugging
     out.write_text(resp.text, encoding="utf-8")
-    print(f"[nomis] WARNING: All date attempts returned 0 rows. Saved empty CSV to {out}")
+    header = resp.text[:500] if resp.text else "(empty response)"
+    print(f"[nomis] WARNING: All strategies returned 0 rows for {dataset_id}.")
+    print(f"[nomis] Response header: {header}")
     return out
 
 
