@@ -11,8 +11,8 @@ def load(observations: Iterable[CompensationObservation]) -> int:
 
 
 def _is_valid(obs: CompensationObservation) -> bool:
-    # AfC salaries realistically fall between ~£22k (band 2 start) and
-    # ~£120k (top of band 9). Anything outside is almost certainly a misparse.
+    # AfC salaries realistically fall between ~£23k (band 2 start) and
+    # ~£130k (top of band 9 + future uplifts). Anything outside is a misparse.
     return (
         obs.value_amount is not None
         and 15_000 <= obs.value_amount <= 160_000
