@@ -43,5 +43,5 @@ jobs:
         with:
           name: nhs-raw-${{ github.run_id }}
           path: data/raw/nhs/
-          retention-days: 365
+          retention-days: 90
           if-no-files-found: ignore

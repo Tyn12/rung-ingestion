@@ -57,5 +57,5 @@ jobs:
         with:
           name: ucu-raw-${{ github.run_id }}
           path: data/raw/ucu/
-          retention-days: 365
+          retention-days: 90
           if-no-files-found: ignore

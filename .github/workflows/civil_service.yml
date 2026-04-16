@@ -56,5 +56,5 @@ jobs:
         with:
           name: civil-service-raw-${{ github.run_id }}
           path: data/raw/civil_service/
-          retention-days: 365
+          retention-days: 90
           if-no-files-found: ignore

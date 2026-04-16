@@ -43,5 +43,5 @@ jobs:
         with:
           name: london-datastore-raw-${{ github.run_id }}
           path: data/raw/london_datastore/
-          retention-days: 365
+          retention-days: 90
           if-no-files-found: ignore

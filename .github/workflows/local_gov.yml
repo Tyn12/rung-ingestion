@@ -49,5 +49,5 @@ jobs:
         with:
           name: local-gov-raw-${{ github.run_id }}
           path: data/raw/local_gov/
-          retention-days: 365
+          retention-days: 90
           if-no-files-found: ignore

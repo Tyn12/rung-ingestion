@@ -47,5 +47,5 @@ jobs:
         with:
           name: ons-earn-raw-${{ github.run_id }}
           path: data/raw/ons_earn/
-          retention-days: 180
+          retention-days: 90
           if-no-files-found: ignore

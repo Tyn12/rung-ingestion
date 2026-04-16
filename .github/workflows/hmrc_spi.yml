@@ -55,5 +55,5 @@ jobs:
         with:
           name: hmrc-spi-raw-${{ github.run_id }}
           path: data/raw/hmrc_spi/
-          retention-days: 365
+          retention-days: 90
           if-no-files-found: ignore
