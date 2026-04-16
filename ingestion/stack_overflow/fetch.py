@@ -29,10 +29,11 @@ RAW_ROOT = Path("data/raw/stack_overflow")
 # URL now returns non-ZIP content). Earlier years may still work at the legacy
 # URL, but if they ever drift, pass --url explicitly.
 KNOWN_RELEASES: dict[int, str] = {
-    2024: "https://cdn.sanity.io/files/jo7n4k8s/production/262f04c41d99fea692e0125c342e446782233fe4.zip/stack-overflow-developer-survey-2024.zip",
-    2023: "https://info.stackoverflowsolutions.com/rs/719-EMH-566/images/stack-overflow-developer-survey-2023.zip",
-    2022: "https://info.stackoverflowsolutions.com/rs/719-EMH-566/images/stack-overflow-developer-survey-2022.zip",
-    2021: "https://info.stackoverflowsolutions.com/rs/719-EMH-566/images/stack-overflow-developer-survey-2021.zip",
+    2025: "https://survey.stackoverflow.co/datasets/stack-overflow-developer-survey-2025.zip",
+    2024: "https://survey.stackoverflow.co/datasets/stack-overflow-developer-survey-2024.zip",
+    2023: "https://survey.stackoverflow.co/datasets/stack-overflow-developer-survey-2023.zip",
+    2022: "https://survey.stackoverflow.co/datasets/stack-overflow-developer-survey-2022.zip",
+    2021: "https://survey.stackoverflow.co/datasets/stack-overflow-developer-survey-2021.zip",
 }
 
 

@@ -16,8 +16,13 @@ survey year (survey fielded in May/June, roughly midpoint = July).
 """
 from __future__ import annotations
 import csv
+import sys
 from datetime import date
 from pathlib import Path
+
+# SO survey CSVs contain very large freetext fields that exceed the default
+# 131072-byte limit.
+csv.field_size_limit(sys.maxsize)
 from typing import Iterator, Optional
 
 from shared.models import (
@@ -41,7 +46,7 @@ COL_ALIASES: dict[str, list[str]] = {
     "country":        ["Country"],
     "respondent_id":  ["ResponseId", "Respondent"],
     "dev_type":       ["DevType"],
-    "years_code_pro": ["YearsCodePro", "YearsCodedJob"],
+    "years_code_pro": ["YearsCodePro", "WorkExp", "YearsCodedJob"],
     "employment":     ["Employment"],
     "comp_yearly":    ["ConvertedCompYearly", "ConvertedComp", "Salary"],
     "comp_raw":       ["CompTotal"],
