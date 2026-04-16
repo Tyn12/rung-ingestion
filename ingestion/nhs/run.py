@@ -75,3 +75,8 @@ def main(argv: list[str] | None = None) -> int:
 
     written = load(records)
     print(f"[nhs:run] Upserted {written} observations.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
