@@ -82,7 +82,7 @@ def _safe_float(raw) -> Optional[float]:
     if raw is None:
         return None
     s = str(raw).replace(",", "").replace("£", "").strip()
-    if not s or s in {"..", "-", "x", "*"}:
+    if not s or s in {"..", "-", "x", "*", "#", ".."}:
         return None
     try:
         return float(s)
@@ -143,46 +143,154 @@ def _build_observation(
     )
 
 
+def _detect_sheet_type(sheet_name: str) -> Optional[str]:
+    """Classify the sheet. Returns 'weekly' or 'annual' or None to skip."""
+    low = sheet_name.lower()
+    if low in ("metadata",):
+        return None
+    if "annual" in low:
+        return "annual"
+    if "weekly" in low or "workers" in low:
+        return "weekly"
+    return "weekly"  # default assumption for unrecognised data sheets
+
+
+def _parse_rows(
+    rows: list[list],
+    *,
+    dataset_code: str,
+    axis: str,
+    sheet_name: str,
+    sheet_type: str,
+) -> list[CompensationObservation]:
+    """Parse rows from a single sheet (works for both openpyxl and xlrd data)."""
+    out: list[CompensationObservation] = []
+
+    # Find the header row with years
+    header_idx = None
+    year_cols: list[tuple[int, int]] = []
+    for i, row in enumerate(rows[:25]):
+        yc = _year_cols(list(row))
+        if len(yc) >= 2:
+            header_idx = i
+            year_cols = yc
+            break
+    if header_idx is None:
+        return out
+
+    # Determine which column has the borough name vs GSS code.
+    # If col 0 starts with 'E0' (GSS code), name is in col 1.
+    first_data_row = None
+    for row in rows[header_idx + 1:]:
+        if row and row[0] is not None and str(row[0]).strip():
+            first_data_row = row
+            break
+    if first_data_row is None:
+        return out
+
+    col0_val = str(first_data_row[0]).strip()
+    if re.match(r"E\d{8}", col0_val):
+        # GSS code in col 0, name in col 1 — use the GSS code directly
+        gss_col = 0
+        name_col = 1
+    else:
+        gss_col = None
+        name_col = 0
+
+    # Weekly sheets have alternating year/conf% columns — skip conf% columns.
+    # The year_cols list already has only the year columns, so we're fine.
+
+    # Set value bounds based on sheet type
+    if sheet_type == "annual":
+        min_val, max_val = 5_000, 250_000
+    else:
+        # Weekly: median gross weekly ~£300-£2000
+        min_val, max_val = 50, 10_000
+
+    for row in rows[header_idx + 1:]:
+        if not row or row[name_col] is None:
+            continue
+
+        # Skip blank or sub-header rows
+        borough = str(row[name_col]).strip()
+        if not borough or borough.lower() in ("code", "area", "date"):
+            continue
+
+        # Get GSS code directly if available, else look up by name
+        if gss_col is not None and gss_col < len(row) and row[gss_col]:
+            gss_code = str(row[gss_col]).strip()
+            if not re.match(r"E\d{8}", gss_code):
+                gss_code = _borough_code(borough)
+        else:
+            gss_code = _borough_code(borough)
+
+        if gss_code is None:
+            continue
+
+        for col_idx, year in year_cols:
+            if col_idx >= len(row):
+                continue
+            val = _safe_float(row[col_idx])
+            if val is None or val < min_val or val > max_val:
+                continue
+
+            # Normalise weekly to annual
+            if sheet_type == "weekly":
+                annual_value = val * 52
+            else:
+                annual_value = val
+
+            ref = f"london_datastore:{dataset_code}:{gss_code}:{sheet_name}:{year}"
+            obs = CompensationObservation(
+                source_id="london_datastore",
+                source_reference=ref,
+                occupation_code=None,
+                location_code=gss_code,
+                company_ref=None,
+                observation_type=ObservationType.POINT,
+                value_amount=val,
+                value_min=None,
+                value_max=None,
+                percentile=50,
+                period=Period.WEEKLY if sheet_type == "weekly" else Period.ANNUAL,
+                normalized_annual_amount=annual_value,
+                normalization_method_version=NORMALIZATION_VERSION,
+                currency="GBP",
+                experience_band=ExperienceBand.UNKNOWN,
+                contract_type=ContractType.UNKNOWN,
+                sample_size=None,
+                total_comp_annual=None,
+                observed_at=date(year, 12, 31),
+                source_payload={
+                    "dataset": dataset_code,
+                    "axis": axis,
+                    "sheet": sheet_name,
+                    "borough": borough,
+                    "sheet_type": sheet_type,
+                },
+            )
+            out.append(obs)
+
+    return out
+
+
 def _parse_xlsx(path: Path, *, dataset_code: str, axis: str) -> list[CompensationObservation]:
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     out: list[CompensationObservation] = []
     for ws in wb.worksheets:
-        rows = list(ws.iter_rows(values_only=True))
+        sheet_type = _detect_sheet_type(ws.title)
+        if sheet_type is None:
+            continue
+        rows = [list(row) for row in ws.iter_rows(values_only=True)]
         if len(rows) < 2:
             continue
-
-        # Find the first row with ≥3 year cells — that's the header row.
-        header_idx = None
-        year_cols: list[tuple[int, int]] = []
-        for i, row in enumerate(rows[:25]):
-            yc = _year_cols(list(row))
-            if len(yc) >= 2:
-                header_idx = i
-                year_cols = yc
-                break
-        if header_idx is None:
-            continue
-
-        for row in rows[header_idx + 1 :]:
-            if not row or row[0] is None:
-                continue
-            borough = str(row[0]).strip()
-            for col_idx, year in year_cols:
-                if col_idx >= len(row):
-                    continue
-                val = _safe_float(row[col_idx])
-                if val is None or val < 5_000 or val > 250_000:
-                    continue
-                obs = _build_observation(
-                    borough=borough,
-                    year=year,
-                    value=val,
-                    axis=axis,
-                    sheet_name=ws.title,
-                    dataset_code=dataset_code,
-                )
-                if obs:
-                    out.append(obs)
+        out.extend(_parse_rows(
+            rows,
+            dataset_code=dataset_code,
+            axis=axis,
+            sheet_name=ws.title,
+            sheet_type=sheet_type,
+        ))
     return out
 
 
@@ -225,44 +333,21 @@ def _parse_xls(path: Path, *, dataset_code: str, axis: str) -> list[Compensation
     wb = xlrd.open_workbook(str(path))
     out: list[CompensationObservation] = []
     for ws in wb.sheets():
+        sheet_type = _detect_sheet_type(ws.name)
+        if sheet_type is None:
+            continue
         rows = []
         for rx in range(ws.nrows):
             rows.append([ws.cell_value(rx, cx) for cx in range(ws.ncols)])
         if len(rows) < 2:
             continue
-
-        # Find the first row with ≥2 year cells — that's the header row.
-        header_idx = None
-        year_cols: list[tuple[int, int]] = []
-        for i, row in enumerate(rows[:25]):
-            yc = _year_cols([str(c) if c else None for c in row])
-            if len(yc) >= 2:
-                header_idx = i
-                year_cols = yc
-                break
-        if header_idx is None:
-            continue
-
-        for row in rows[header_idx + 1:]:
-            if not row or not row[0]:
-                continue
-            borough = str(row[0]).strip()
-            for col_idx, year in year_cols:
-                if col_idx >= len(row):
-                    continue
-                val = _safe_float(row[col_idx])
-                if val is None or val < 5_000 or val > 250_000:
-                    continue
-                obs = _build_observation(
-                    borough=borough,
-                    year=year,
-                    value=val,
-                    axis=axis,
-                    sheet_name=ws.name,
-                    dataset_code=dataset_code,
-                )
-                if obs:
-                    out.append(obs)
+        out.extend(_parse_rows(
+            rows,
+            dataset_code=dataset_code,
+            axis=axis,
+            sheet_name=ws.name,
+            sheet_type=sheet_type,
+        ))
     return out
 
 
