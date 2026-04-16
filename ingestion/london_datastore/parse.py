@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import openpyxl
+import xlrd
 
 from shared.models import (
     CompensationObservation,
@@ -219,6 +220,52 @@ def _parse_csv(path: Path, *, dataset_code: str, axis: str) -> list[Compensation
     return out
 
 
+def _parse_xls(path: Path, *, dataset_code: str, axis: str) -> list[CompensationObservation]:
+    """Parse legacy .xls files using xlrd."""
+    wb = xlrd.open_workbook(str(path))
+    out: list[CompensationObservation] = []
+    for ws in wb.sheets():
+        rows = []
+        for rx in range(ws.nrows):
+            rows.append([ws.cell_value(rx, cx) for cx in range(ws.ncols)])
+        if len(rows) < 2:
+            continue
+
+        # Find the first row with ≥2 year cells — that's the header row.
+        header_idx = None
+        year_cols: list[tuple[int, int]] = []
+        for i, row in enumerate(rows[:25]):
+            yc = _year_cols([str(c) if c else None for c in row])
+            if len(yc) >= 2:
+                header_idx = i
+                year_cols = yc
+                break
+        if header_idx is None:
+            continue
+
+        for row in rows[header_idx + 1:]:
+            if not row or not row[0]:
+                continue
+            borough = str(row[0]).strip()
+            for col_idx, year in year_cols:
+                if col_idx >= len(row):
+                    continue
+                val = _safe_float(row[col_idx])
+                if val is None or val < 5_000 or val > 250_000:
+                    continue
+                obs = _build_observation(
+                    borough=borough,
+                    year=year,
+                    value=val,
+                    axis=axis,
+                    sheet_name=ws.name,
+                    dataset_code=dataset_code,
+                )
+                if obs:
+                    out.append(obs)
+    return out
+
+
 def parse_earnings_file(
     path: Path,
     *,
@@ -226,8 +273,10 @@ def parse_earnings_file(
     axis: str,
 ) -> list[CompensationObservation]:
     suffix = path.suffix.lower()
-    if suffix in {".xlsx", ".xls"}:
+    if suffix == ".xlsx":
         return _parse_xlsx(path, dataset_code=dataset_code, axis=axis)
+    if suffix == ".xls":
+        return _parse_xls(path, dataset_code=dataset_code, axis=axis)
     if suffix == ".csv":
         return _parse_csv(path, dataset_code=dataset_code, axis=axis)
     raise ValueError(f"Unsupported file type for {path}")
