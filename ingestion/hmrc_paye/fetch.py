@@ -1,23 +1,22 @@
-"""Fetch the monthly ONS / HMRC Earnings from PAYE RTI bulletin.
+"""Fetch the monthly ONS / HMRC Earnings from PAYE RTI datasets.
 
 Source
 ------
-ONS publishes a monthly bulletin with PAYE-derived earnings aggregates. The page
-hosts downloadable XLSX workbooks covering:
-
+ONS publishes monthly PAYE-RTI statistics covering:
     - Median monthly pay by industry (SIC)
     - Median monthly pay by age band
     - Median monthly pay by geography
     - Employees by industry / region / age
 
-Landing page:
-    https://www.ons.gov.uk/employmentandlabourmarket/peopleinwork/
-    earningsandworkinghours/bulletins/
-    earningsandemploymentfrompayasyouearnrealtimeinformationuk/latest
+The data XLSX files live on dedicated *dataset* pages that use the stable
+``/current/`` suffix — so the URL always resolves to the latest edition:
 
-Download links change each month (they embed the publication date). We scrape
-the landing page to discover the current release's XLSX files rather than
-hard-coding paths that go stale.
+    .../datasets/realtimeinformationstatisticsreferencetable/current
+    .../datasets/realtimeinformationstatisticsreferencetableseasonallyadjusted/current
+
+We scrape each dataset page for XLSX download links and pull them all. This is
+more resilient than scraping the bulletin landing page, which no longer
+directly links the data workbooks.
 
 Rate limiting
 -------------
@@ -36,12 +35,15 @@ from urllib.parse import urljoin
 import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-BULLETIN_LANDING_URL = (
-    "https://www.ons.gov.uk/employmentandlabourmarket/peopleinwork/"
-    "earningsandworkinghours/bulletins/"
-    "earningsandemploymentfrompayasyouearnrealtimeinformationuk/latest"
-)
-ONS_ROOT = "https://www.ons.gov.uk"
+_ONS_BASE = "https://www.ons.gov.uk"
+_EARNS_PATH = "/employmentandlabourmarket/peopleinwork/earningsandworkinghours/datasets"
+
+# Stable /current/ dataset pages whose XLSX links we scrape.
+DATASET_PAGES: list[str] = [
+    f"{_ONS_BASE}{_EARNS_PATH}/realtimeinformationstatisticsreferencetable/current",
+    f"{_ONS_BASE}{_EARNS_PATH}/realtimeinformationstatisticsreferencetableseasonallyadjusted/current",
+]
+
 RAW_ROOT = Path("data/raw/hmrc_paye")
 
 # Minimum gap between HTTP calls.
@@ -72,31 +74,47 @@ def _get(url: str, **kwargs) -> requests.Response:
     return resp
 
 
-def _discover_xlsx_links(landing_html: str) -> list[str]:
-    """Find every XLSX link on the bulletin landing page."""
-    # ONS HTML is stable enough that a regex beats pulling a full DOM parser
-    # into the dependency tree. We capture both absolute and relative hrefs.
-    matches = re.findall(r'href="([^"]+\.xlsx)"', landing_html, flags=re.IGNORECASE)
+def _discover_xlsx_links(html: str) -> list[str]:
+    """Find every XLSX link in an HTML page."""
+    matches = re.findall(r'href="([^"]+\.xlsx)"', html, flags=re.IGNORECASE)
     return list(dict.fromkeys(matches))   # de-dupe, preserve order
 
 
+def _is_example_file(url: str) -> bool:
+    """Filter out methodology/example files that aren't real data."""
+    low = url.lower()
+    return "example" in low or "methodology" in low or "guide" in low
+
+
 def fetch_latest(output_root: Path = RAW_ROOT, today: Optional[date] = None) -> list[Path]:
-    """Download every XLSX on the latest bulletin, save under data/raw/hmrc_paye/{date}/."""
+    """Download PAYE RTI XLSX files from ONS dataset pages."""
     today = today or date.today()
     out_dir = output_root / today.isoformat()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    landing = _get(BULLETIN_LANDING_URL, headers={"User-Agent": "Rung/0.1 (+ingestion)"})
-    xlsx_rels = _discover_xlsx_links(landing.text)
-    if not xlsx_rels:
-        raise RuntimeError("No XLSX links discovered on the ONS bulletin page.")
+    all_urls: list[str] = []
+    for page_url in DATASET_PAGES:
+        try:
+            resp = _get(page_url, headers={"User-Agent": "Rung/0.1 (+ingestion)"})
+            xlsx_rels = _discover_xlsx_links(resp.text)
+            for rel in xlsx_rels:
+                full = rel if rel.startswith("http") else urljoin(_ONS_BASE, rel)
+                if not _is_example_file(full):
+                    all_urls.append(full)
+        except Exception as e:  # noqa: BLE001
+            print(f"[hmrc_paye:fetch] Warning: could not scrape {page_url}: {e}")
 
-    # Persist the raw HTML so we can audit what we saw at scrape time.
-    (out_dir / "_landing.html").write_text(landing.text, encoding="utf-8")
+    # De-duplicate across pages (same XLSX can appear on both SA and NSA pages).
+    all_urls = list(dict.fromkeys(all_urls))
+
+    if not all_urls:
+        raise RuntimeError(
+            "No data XLSX links discovered on ONS PAYE RTI dataset pages. "
+            "Dataset page URLs may have changed — check DATASET_PAGES."
+        )
 
     files: list[Path] = []
-    for rel in xlsx_rels:
-        url = rel if rel.startswith("http") else urljoin(ONS_ROOT, rel)
+    for url in all_urls:
         fname = url.rsplit("/", 1)[-1].split("?")[0]
         dest = out_dir / fname
         print(f"[hmrc_paye:fetch] Downloading {url}")
