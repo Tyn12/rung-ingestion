@@ -11,8 +11,17 @@ def load(observations: Iterable[CompensationObservation]) -> int:
 
 
 def _is_valid(obs: CompensationObservation) -> bool:
-    # Borough medians realistically £15k-£110k (Westminster outlier ~£90k).
-    return (
-        obs.value_amount is not None
-        and 5_000 <= obs.value_amount <= 250_000
-    )
+    """Validate before upsert.
+
+    Partitions only exist for 2024+, so reject older observations.
+    Use normalized_annual_amount for plausibility check since value_amount
+    varies by period (weekly £300-£2000, annual £15k-£110k).
+    """
+    if obs.observed_at is not None and obs.observed_at.year < 2024:
+        return False
+    if obs.value_amount is None and obs.value_min is None:
+        return False
+    if obs.normalized_annual_amount is not None:
+        if obs.normalized_annual_amount < 5_000 or obs.normalized_annual_amount > 500_000:
+            return False
+    return True

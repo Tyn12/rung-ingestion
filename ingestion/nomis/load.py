@@ -13,12 +13,27 @@ from shared.models import CompensationObservation
 
 def load(observations: Iterable[CompensationObservation]) -> int:
     """Validate then bulk-upsert. Returns the count written."""
-    validated = [o for o in observations if _is_valid(o)]
-    skipped = 0
+    all_obs = list(observations)
+    validated = [o for o in all_obs if _is_valid(o)]
+    rejected = len(all_obs) - len(validated)
+    if rejected > 0:
+        # Log first few rejection reasons for diagnostics
+        for o in all_obs[:3]:
+            reasons = []
+            if o.value_amount is None and o.value_min is None:
+                reasons.append("no value")
+            if o.location_code is None:
+                reasons.append("no location_code")
+            if o.normalized_annual_amount is not None:
+                if o.normalized_annual_amount < 2_500:
+                    reasons.append(f"annual={o.normalized_annual_amount:.0f} < 2500")
+                if o.normalized_annual_amount > 500_000:
+                    reasons.append(f"annual={o.normalized_annual_amount:.0f} > 500000")
+            valid = not reasons
+            print(f"[nomis:load] Sample: loc={o.location_code} val={o.value_amount} "
+                  f"annual={o.normalized_annual_amount} valid={valid} reasons={reasons or 'OK'}")
+        print(f"[nomis:load] {rejected}/{len(all_obs)} observations rejected by validation.")
     written = bulk_upsert(validated)
-    # We count by difference so callers can log data quality metrics.
-    total = written + skipped
-    _ = total  # silence linters; metric emission comes later
     return written
 
 
