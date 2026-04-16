@@ -22,4 +22,10 @@ def _is_valid(obs: CompensationObservation) -> bool:
         return False
     if obs.normalized_annual_amount > 5_000_000:
         return False
+    # Only keep listings from years we have partitions for (2024+).
+    # Reed search results occasionally include stale listings from years ago.
+    if obs.observed_at is None:
+        return False
+    if obs.observed_at.year < 2024:
+        return False
     return True

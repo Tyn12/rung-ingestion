@@ -40,7 +40,7 @@ LONDON_DATASETS: tuple[LondonDataset, ...] = (
         axis="residence",
     ),
     LondonDataset(
-        slug="gender-pay-gap",
+        slug="gender-pay-gaps",
         code="GPG_LONDON",
         axis="gender_pay_gap",
     ),
@@ -79,14 +79,23 @@ def _get_bytes(url: str) -> bytes:
     return resp.content
 
 
+import re
+
 _CKAN_BASES = [
     "https://data.london.gov.uk/api/3/action",
     "https://data.london.gov.uk/api/action",
 ]
 
+_DATASET_PAGE = "https://data.london.gov.uk/dataset"
+
 
 def _latest_xlsx_resource(slug: str) -> Optional[dict]:
-    # Try both CKAN API path variants — GLA has moved between them over time.
+    """Find the latest XLSX resource for a London Datastore dataset.
+
+    Tries CKAN package_show API first, then falls back to scraping the
+    dataset HTML page for direct download links.
+    """
+    # --- Attempt 1: CKAN API ---
     payload: Optional[dict] = None
     last_err: Optional[Exception] = None
     for base in _CKAN_BASES:
@@ -99,28 +108,59 @@ def _latest_xlsx_resource(slug: str) -> Optional[dict]:
             last_err = e
             continue
 
-    if payload is None or not payload.get("success"):
+    if payload and payload.get("success"):
+        resources = payload["result"].get("resources", []) or []
+
+        def _sort_key(r: dict) -> tuple:
+            return (r.get("last_modified") or r.get("created") or "", r.get("name") or "")
+
+        xlsx = sorted(
+            [r for r in resources if (r.get("format") or "").lower() in {"xlsx", "xls"}],
+            key=_sort_key,
+            reverse=True,
+        )
+        csv_res = sorted(
+            [r for r in resources if (r.get("format") or "").lower() == "csv"],
+            key=_sort_key,
+            reverse=True,
+        )
+        result = (xlsx or csv_res or resources or [None])[0]
+        if result:
+            return result
+
+    # --- Attempt 2: Scrape dataset page for download links ---
+    print(f"[london_datastore:fetch] CKAN API failed for {slug}, trying HTML scrape")
+    page_url = f"{_DATASET_PAGE}/{slug}"
+    try:
+        resp = requests.get(
+            page_url,
+            headers={"User-Agent": "Rung/0.1 (+ingestion)"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        # Look for XLSX/CSV download links
+        xlsx_links = re.findall(
+            r'href="([^"]+\.xlsx[^"]*)"', resp.text, flags=re.IGNORECASE
+        )
+        csv_links = re.findall(
+            r'href="([^"]+\.csv[^"]*)"', resp.text, flags=re.IGNORECASE
+        )
+        link = (xlsx_links or csv_links or [None])[0]
+        if link:
+            fmt = "xlsx" if xlsx_links else "csv"
+            # Make absolute if relative
+            if link.startswith("/"):
+                link = f"https://data.london.gov.uk{link}"
+            return {"url": link, "format": fmt, "name": slug}
+    except Exception as e:  # noqa: BLE001
+        print(f"[london_datastore:fetch] HTML scrape also failed for {slug}: {e}")
         if last_err:
             raise last_err
-        raise ValueError(f"CKAN package_show failed for {slug}: {payload}")
+        raise
 
-    resources = payload["result"].get("resources", []) or []
-
-    # Prefer the newest XLSX; fall back to CSV, then first available.
-    def _sort_key(r: dict) -> tuple:
-        return (r.get("last_modified") or r.get("created") or "", r.get("name") or "")
-
-    xlsx = sorted(
-        [r for r in resources if (r.get("format") or "").lower() in {"xlsx", "xls"}],
-        key=_sort_key,
-        reverse=True,
-    )
-    csv = sorted(
-        [r for r in resources if (r.get("format") or "").lower() == "csv"],
-        key=_sort_key,
-        reverse=True,
-    )
-    return (xlsx or csv or resources or [None])[0]
+    if last_err:
+        raise last_err
+    raise ValueError(f"No downloadable resource found for {slug}")
 
 
 def fetch_latest_resource(

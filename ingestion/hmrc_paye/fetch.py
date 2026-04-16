@@ -40,7 +40,7 @@ _EARNS_PATH = "/employmentandlabourmarket/peopleinwork/earningsandworkinghours/d
 
 # Stable /current/ dataset pages whose XLSX links we scrape.
 DATASET_PAGES: list[str] = [
-    f"{_ONS_BASE}{_EARNS_PATH}/realtimeinformationstatisticsreferencetable/current",
+    f"{_ONS_BASE}{_EARNS_PATH}/realtimeinformationstatisticsreferencetablenonseasonallyadjusted/current",
     f"{_ONS_BASE}{_EARNS_PATH}/realtimeinformationstatisticsreferencetableseasonallyadjusted/current",
 ]
 
@@ -75,15 +75,27 @@ def _get(url: str, **kwargs) -> requests.Response:
 
 
 def _discover_xlsx_links(html: str) -> list[str]:
-    """Find every XLSX link in an HTML page."""
-    matches = re.findall(r'href="([^"]+\.xlsx)"', html, flags=re.IGNORECASE)
+    """Find every XLSX link in an HTML page.
+
+    ONS dataset pages use two patterns:
+        href="/file?uri=/long/path/file.xlsx"
+        href="https://download.ons.gov.uk/downloads/datasets/.../file.xlsx"
+    """
+    matches = re.findall(r'href="([^"]*\.xlsx[^"]*)"', html, flags=re.IGNORECASE)
     return list(dict.fromkeys(matches))   # de-dupe, preserve order
+
+
+_SKIP_PATTERNS = re.compile(
+    r"example|methodology|guide|accessible|template",
+    re.IGNORECASE,
+)
 
 
 def _is_example_file(url: str) -> bool:
     """Filter out methodology/example files that aren't real data."""
-    low = url.lower()
-    return "example" in low or "methodology" in low or "guide" in low
+    # Check the filename portion only (after last /)
+    filename = url.rsplit("/", 1)[-1].split("?")[0].lower()
+    return bool(_SKIP_PATTERNS.search(filename))
 
 
 def fetch_latest(output_root: Path = RAW_ROOT, today: Optional[date] = None) -> list[Path]:
