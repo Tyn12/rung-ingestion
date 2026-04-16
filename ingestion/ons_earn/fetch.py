@@ -29,21 +29,21 @@ class EarnDataset:
 EARN_DATASETS: tuple[EarnDataset, ...] = (
     EarnDataset(
         code="EARN01",
-        label="Average weekly earnings, whole economy",
-        url="https://www.ons.gov.uk/file?uri=/employmentandlabourmarket/peopleinwork/earningsandworkingtime/datasets/averageweeklyearningsearn01/current/earn01.xlsx",
+        label="Average weekly earnings – headline (SA)",
+        url="https://www.ons.gov.uk/file?uri=/employmentandlabourmarket/peopleinwork/earningsandworkinghours/datasets/averageweeklyearningsearn01/current/earn01.xlsx",
         axis="overall",
     ),
     EarnDataset(
         code="EARN02",
-        label="Average weekly earnings by industry",
-        url="https://www.ons.gov.uk/file?uri=/employmentandlabourmarket/peopleinwork/earningsandworkingtime/datasets/averageweeklyearningsbyindustryearn02/current/earn02.xlsx",
-        axis="industry",
+        label="Average weekly earnings by sector (NSA)",
+        url="https://www.ons.gov.uk/file?uri=/employmentandlabourmarket/peopleinwork/earningsandworkinghours/datasets/averageweeklyearningsbysectorearn02/current/earn02.xlsx",
+        axis="industry",     # sector-level, close enough for our purposes
     ),
     EarnDataset(
         code="EARN03",
-        label="Average weekly earnings by region",
-        url="https://www.ons.gov.uk/file?uri=/employmentandlabourmarket/peopleinwork/earningsandworkingtime/datasets/averageweeklyearningsbyregionearn03/current/earn03.xlsx",
-        axis="region",
+        label="Average weekly earnings by industry (NSA)",
+        url="https://www.ons.gov.uk/file?uri=/employmentandlabourmarket/peopleinwork/earningsandworkinghours/datasets/averageweeklyearningsbyindustryearn03/current/earn03.xlsx",
+        axis="industry",
     ),
 )
 

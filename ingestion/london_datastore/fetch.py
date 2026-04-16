@@ -35,7 +35,7 @@ LONDON_DATASETS: tuple[LondonDataset, ...] = (
         axis="workplace",
     ),
     LondonDataset(
-        slug="earnings-residence-borough",
+        slug="earnings-place-residence-borough",
         code="EARN_RESIDENCE",
         axis="residence",
     ),
@@ -79,11 +79,31 @@ def _get_bytes(url: str) -> bytes:
     return resp.content
 
 
+_CKAN_BASES = [
+    "https://data.london.gov.uk/api/3/action",
+    "https://data.london.gov.uk/api/action",
+]
+
+
 def _latest_xlsx_resource(slug: str) -> Optional[dict]:
-    url = f"https://data.london.gov.uk/api/3/action/package_show?id={slug}"
-    payload = _get_json(url)
-    if not payload.get("success"):
+    # Try both CKAN API path variants — GLA has moved between them over time.
+    payload: Optional[dict] = None
+    last_err: Optional[Exception] = None
+    for base in _CKAN_BASES:
+        url = f"{base}/package_show?id={slug}"
+        try:
+            payload = _get_json(url)
+            if payload.get("success"):
+                break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            continue
+
+    if payload is None or not payload.get("success"):
+        if last_err:
+            raise last_err
         raise ValueError(f"CKAN package_show failed for {slug}: {payload}")
+
     resources = payload["result"].get("resources", []) or []
 
     # Prefer the newest XLSX; fall back to CSV, then first available.
