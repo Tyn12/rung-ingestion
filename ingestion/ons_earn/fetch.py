@@ -90,25 +90,30 @@ def _get(url: str) -> requests.Response:
 
 
 def _discover_xlsx_url(page_url: str) -> str:
-    """Scrape an ONS dataset page for the XLSX download link."""
+    """Scrape an ONS dataset page for the XLS/XLSX download link."""
     resp = _get(page_url)
-    # ONS pages have download links like href="/file?uri=/.../earn01mar2026.xlsx"
-    matches = re.findall(r'href="([^"]*\.xlsx[^"]*)"', resp.text, re.IGNORECASE)
+    # ONS pages have download links like href="/file?uri=/.../earn01mar2026.xls"
+    # Match both .xls and .xlsx extensions.
+    matches = re.findall(r'href="([^"]*\.xlsx?[^"]*)"', resp.text, re.IGNORECASE)
     if not matches:
         raise RuntimeError(
-            f"No XLSX download link found on {page_url}. "
+            f"No XLS/XLSX download link found on {page_url}. "
             f"ONS may have changed the page layout."
         )
-    # Take the first XLSX link — typically the main data file.
-    rel = matches[0]
+    # Prefer .xlsx over .xls if both present; otherwise take first match.
+    xlsx = [m for m in matches if m.lower().endswith(".xlsx")]
+    rel = xlsx[0] if xlsx else matches[0]
     return rel if rel.startswith("http") else urljoin(_ONS_ROOT, rel)
 
 
 def fetch_earn_xlsx(dataset: EarnDataset, output_root: Path = RAW_ROOT) -> Path:
     output_root.mkdir(parents=True, exist_ok=True)
-    dest = output_root / f"{dataset.code.lower()}.xlsx"
 
     xlsx_url = _discover_xlsx_url(dataset.page_url)
+    # Preserve the actual extension (.xls or .xlsx)
+    ext = ".xlsx" if xlsx_url.lower().endswith(".xlsx") else ".xls"
+    dest = output_root / f"{dataset.code.lower()}{ext}"
+
     print(f"[ons_earn:fetch] {dataset.code} ← {xlsx_url}")
     resp = _get(xlsx_url)
     dest.write_bytes(resp.content)

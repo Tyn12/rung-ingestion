@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import openpyxl
+import xlrd
 
 from shared.models import (
     CompensationObservation,
@@ -196,6 +197,42 @@ def _extract_from_sheet(
     return out
 
 
+class _XlrdSheetAdapter:
+    """Wraps an xlrd sheet to match the openpyxl ws interface used by _extract_from_sheet.
+
+    XLS files store dates as float serial numbers. We convert date cells in
+    column 0 back to "YYYY MMM" strings so _parse_period_label can match them.
+    """
+
+    _MONTH_ABBR = [
+        "", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ]
+
+    def __init__(self, sheet, datemode: int = 0):
+        self._sheet = sheet
+        self._datemode = datemode
+        self.title = sheet.name
+
+    def _convert_cell(self, rx: int, cx: int):
+        """Return cell value, converting date floats in col-0 to 'YYYY MMM'."""
+        ctype = self._sheet.cell_type(rx, cx)
+        val = self._sheet.cell_value(rx, cx)
+        # XL_CELL_DATE == 3
+        if ctype == 3 and cx == 0:
+            try:
+                dt = xlrd.xldate_as_tuple(val, self._datemode)
+                # dt = (year, month, day, hour, minute, second)
+                return f"{dt[0]} {self._MONTH_ABBR[dt[1]]}"
+            except Exception:
+                return val
+        return val
+
+    def iter_rows(self, values_only: bool = True):
+        for rx in range(self._sheet.nrows):
+            yield tuple(self._convert_cell(rx, cx) for cx in range(self._sheet.ncols))
+
+
 def parse_earn_file(
     path: Path,
     *,
@@ -205,15 +242,27 @@ def parse_earn_file(
 ) -> list[CompensationObservation]:
     """Extract weekly earnings observations from an ONS EARN workbook.
 
+    Supports both .xlsx (openpyxl) and .xls (xlrd) formats.
     Pass ``since`` to limit to recent observations (e.g. only the last 2 years);
     otherwise the full time-series back to the 1960s comes through.
     """
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     all_obs: list[CompensationObservation] = []
-    for ws in wb.worksheets:
-        all_obs.extend(
-            _extract_from_sheet(ws, dataset_code=dataset_code, axis=axis)
-        )
+    if path.suffix.lower() == ".xls":
+        wb = xlrd.open_workbook(str(path))
+        for sheet in wb.sheets():
+            all_obs.extend(
+                _extract_from_sheet(
+                    _XlrdSheetAdapter(sheet, datemode=wb.datemode),
+                    dataset_code=dataset_code,
+                    axis=axis,
+                )
+            )
+    else:
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        for ws in wb.worksheets:
+            all_obs.extend(
+                _extract_from_sheet(ws, dataset_code=dataset_code, axis=axis)
+            )
     if since:
         all_obs = [o for o in all_obs if o.observed_at and o.observed_at >= since]
     return all_obs
