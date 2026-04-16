@@ -148,6 +148,8 @@ def _detect_sheet_type(sheet_name: str) -> Optional[str]:
     low = sheet_name.lower()
     if low in ("metadata",):
         return None
+    if "hourly" in low:
+        return None  # skip hourly sheets — values too granular for our model
     if "annual" in low:
         return "annual"
     if "weekly" in low or "workers" in low:
@@ -190,8 +192,12 @@ def _parse_rows(
 
     col0_val = str(first_data_row[0]).strip()
     if re.match(r"E\d{8}", col0_val):
-        # GSS code in col 0, name in col 1 — use the GSS code directly
+        # GSS code in col 0, name in col 1
         gss_col = 0
+        name_col = 1
+    elif re.match(r"\d{2}[A-Z]{2}", col0_val):
+        # Old-style council code in col 0 (e.g. 00AB), name in col 1
+        gss_col = None
         name_col = 1
     else:
         gss_col = None
