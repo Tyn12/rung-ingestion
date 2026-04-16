@@ -9,8 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       year:
-        description: "Survey year to ingest"
-        required: true
+        description: "Survey year (blank = current year)"
+        required: false
+        default: ""
         type: string
       url:
         description: "Override download URL"

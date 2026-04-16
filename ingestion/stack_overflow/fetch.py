@@ -7,12 +7,10 @@ each summer (typically May/June). The download is a ZIP containing:
 
 Licence: CC BY-SA 4.0 (we credit Stack Overflow when exposing in-app).
 
-Release URLs follow a stable but year-suffixed pattern:
-    https://info.stackoverflowsolutions.com/rs/719-EMH-566/images/
-    stack-overflow-developer-survey-{year}.zip
-
-New releases may move — we maintain a small registry of known-good URLs and
-allow override via --url. When a new year drops, add a line to KNOWN_RELEASES.
+Historically the releases lived at info.stackoverflowsolutions.com, but around
+late 2024 Stack Overflow migrated static downloads to cdn.sanity.io. We keep
+a small registry of last-known-good URLs and allow override via --url. When
+a new year drops, add a line to KNOWN_RELEASES.
 """
 from __future__ import annotations
 import io
@@ -27,12 +25,19 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 RAW_ROOT = Path("data/raw/stack_overflow")
 
 # Last-known-good release URLs. Update as new surveys are published.
+# 2024 was re-hosted on Sanity CDN (the original info.stackoverflowsolutions.com
+# URL now returns non-ZIP content). Earlier years may still work at the legacy
+# URL, but if they ever drift, pass --url explicitly.
 KNOWN_RELEASES: dict[int, str] = {
-    2024: "https://info.stackoverflowsolutions.com/rs/719-EMH-566/images/stack-overflow-developer-survey-2024.zip",
+    2024: "https://cdn.sanity.io/files/jo7n4k8s/production/262f04c41d99fea692e0125c342e446782233fe4.zip/stack-overflow-developer-survey-2024.zip",
     2023: "https://info.stackoverflowsolutions.com/rs/719-EMH-566/images/stack-overflow-developer-survey-2023.zip",
     2022: "https://info.stackoverflowsolutions.com/rs/719-EMH-566/images/stack-overflow-developer-survey-2022.zip",
     2021: "https://info.stackoverflowsolutions.com/rs/719-EMH-566/images/stack-overflow-developer-survey-2021.zip",
 }
+
+
+# First two bytes of a ZIP archive ("PK") — RFC 1952 magic number.
+_ZIP_MAGIC = b"PK"
 
 
 @retry(
@@ -66,7 +71,18 @@ def fetch_release(
     zip_path = year_dir / f"survey_{year}.zip"
     if not zip_path.exists():
         print(f"[so:fetch] Downloading {url}")
-        zip_path.write_bytes(_get(url))
+        content = _get(url)
+        # Validate we actually got a ZIP before committing to disk — Stack
+        # Overflow has a habit of returning 200 with an HTML error page or
+        # redirect landing page when the direct file has moved.
+        if not content.startswith(_ZIP_MAGIC):
+            head = content[:80].decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"URL returned non-ZIP content (first 80 bytes: {head!r}). "
+                f"The URL for {year} has likely moved. Update KNOWN_RELEASES "
+                f"or pass --url explicitly. URL tried: {url}"
+            )
+        zip_path.write_bytes(content)
     else:
         print(f"[so:fetch] Using cached {zip_path}")
 
