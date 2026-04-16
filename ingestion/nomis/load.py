@@ -25,13 +25,16 @@ def load(observations: Iterable[CompensationObservation]) -> int:
 def _is_valid(obs: CompensationObservation) -> bool:
     """Per-source validation rules for ASHE.
 
-    ASHE must have a geography and occupation to be useful. Values without these
-    are almost always 'all occupations' totals we don't want polluting the table.
+    We require a value and a geography. Occupation code is optional —
+    aggregate 'all occupations' rows are still valuable for benchmarking
+    regional/national pay levels.
     """
     if obs.value_amount is None and obs.value_min is None:
         return False
-    if obs.occupation_code is None:
-        return False
     if obs.location_code is None:
         return False
+    # Weekly pay must be plausible (£50–£5000/week → ~£2.6k–£260k/yr)
+    if obs.normalized_annual_amount is not None:
+        if obs.normalized_annual_amount < 2_500 or obs.normalized_annual_amount > 500_000:
+            return False
     return True
