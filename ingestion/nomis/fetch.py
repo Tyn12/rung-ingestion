@@ -116,20 +116,21 @@ def fetch_data(
 ) -> Path:
     """Fetch ASHE data as CSV for the given years and occupations.
 
-    If `years` is None, fetches 'latest'.
+    If `years` is None, tries 'latest', then falls back to explicit recent years.
     If `occupations` is None, fetches all available occupation codes.
 
     Returns the path to the raw CSV dump.
     """
-    date_param = ",".join(str(y) for y in years) if years else "latest"
-
-    # For the occupation dimension, use numeric ranges to get all SOC codes.
-    # "0...9999" fetches every occupation level (major through unit group).
-    occ_param = ",".join(occupations) if occupations else "0...9999"
     geo_param = ",".join(UK_REGION_GEOGRAPHIES.keys())
+    occ_param = ",".join(occupations) if occupations else "0...9999"
 
-    params = {
-        "date": date_param,
+    # Build date parameter: prefer explicit years for reliability, 'latest' as default
+    if years:
+        date_param = ",".join(str(y) for y in years)
+    else:
+        date_param = "latest"
+
+    base_params = {
         "geography": geo_param,
         "sex": ",".join(str(s) for s in SEX_CODES),
         "item": ",".join(str(i) for i in PAY_ITEMS),
@@ -140,15 +141,31 @@ def fetch_data(
     }
 
     url = f"{NOMIS_BASE}/dataset/{dataset_id}.data.csv"
-    print(f"[nomis] Fetching {dataset_id} CSV for years={date_param}, occupations={occ_param[:40]}...")
-    resp = _get(url, params=params)
-
     out = _data_dir(dataset_id) / f"data_{date.today().isoformat()}.csv"
-    out.write_text(resp.text, encoding="utf-8")
 
-    # Count lines (minus header) to report
-    n_rows = resp.text.count("\n") - 1
-    print(f"[nomis] Wrote {max(0, n_rows)} rows to {out}")
+    # Try date=latest first, then fall back to explicit recent years
+    attempts = [date_param]
+    if date_param == "latest":
+        # Also try explicit years as fallback — 'latest' is unreliable for some datasets
+        current_year = date.today().year
+        attempts.append(",".join(str(y) for y in range(current_year - 3, current_year + 1)))
+
+    for attempt in attempts:
+        params = {**base_params, "date": attempt}
+        print(f"[nomis] Fetching {dataset_id} CSV for date={attempt}, occupations={occ_param[:40]}...")
+        resp = _get(url, params=params)
+        n_rows = resp.text.count("\n") - 1
+
+        if n_rows > 0:
+            out.write_text(resp.text, encoding="utf-8")
+            print(f"[nomis] Wrote {n_rows} rows to {out}")
+            return out
+        else:
+            print(f"[nomis] date={attempt} returned 0 data rows, trying next...")
+
+    # If all attempts returned 0 rows, save the last response anyway for debugging
+    out.write_text(resp.text, encoding="utf-8")
+    print(f"[nomis] WARNING: All date attempts returned 0 rows. Saved empty CSV to {out}")
     return out
 
 
