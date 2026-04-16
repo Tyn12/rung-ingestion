@@ -1,0 +1,76 @@
+name: Ingest Reed Listings
+
+# Reed's Jobseeker API — daily broad sweep across UK cities.
+# Runs 03:30 UTC (04:30 BST / 03:30 GMT) — after most overnight listings post.
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      locations:
+        description: "Space-separated subset of locations, or blank for full UK sweep."
+        required: false
+        default: ""
+      keywords:
+        description: "Optional keyword filter."
+        required: false
+        default: ""
+      dry_run:
+        description: "Fetch + parse but skip DB write"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+concurrency:
+  group: ingest-reed
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120       # Broad sweep can take ~90 min with throttling
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      REED_API_KEY: ${{ secrets.REED_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Reed ingestion
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.locations }}" ]; then
+            ARGS="$ARGS --locations ${{ github.event.inputs.locations }}"
+          fi
+          if [ -n "${{ github.event.inputs.keywords }}" ]; then
+            ARGS="$ARGS --keywords \"${{ github.event.inputs.keywords }}\""
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          echo "Running: python -m ingestion.reed.run $ARGS"
+          eval "python -m ingestion.reed.run $ARGS"
+
+      - name: Upload raw data artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reed-raw-${{ github.run_id }}
+          path: data/raw/reed/
+          retention-days: 30
+          if-no-files-found: ignore

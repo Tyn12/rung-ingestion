@@ -1,0 +1,47 @@
+name: Ingest HMRC PAYE RTI
+
+# ONS PAYE bulletin publishes around the 15th of each month. We run twice:
+# the 16th (catch the headline release) and the 22nd (catch late revisions).
+
+on:
+  schedule:
+    - cron: "0 5 16 * *"
+    - cron: "0 5 22 * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Fetch + parse but skip DB write"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+concurrency:
+  group: ingest-hmrc-paye
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run HMRC PAYE ingestion
+        run: |
+          ARGS=""
+          [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="--dry-run"
+          python -m ingestion.hmrc_paye.run $ARGS
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hmrc-paye-raw-${{ github.run_id }}
+          path: data/raw/hmrc_paye/
+          retention-days: 30
+          if-no-files-found: ignore

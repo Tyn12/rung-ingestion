@@ -1,0 +1,60 @@
+name: Ingest Civil Service Pay Bands
+
+# Cabinet Office publishes annual pay remit guidance + SCS pay framework
+# each spring/summer. We poll weekly April-July; --seed-fallback guarantees
+# we always have the baseline bands loaded.
+
+on:
+  schedule:
+    - cron: "30 7 * * 4"    # Thursdays 07:30 UTC
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Pay year starting (April)"
+        required: false
+        default: ""
+      url:
+        description: "Override bands URL"
+        required: false
+        default: ""
+      seed_only:
+        description: "Skip fetch; use hand-curated baseline"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      dry_run:
+        description: "Fetch + parse but skip DB write"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run ingestion
+        run: |
+          ARGS="--seed-fallback"
+          [ -n "${{ github.event.inputs.year }}" ] && ARGS="$ARGS --year ${{ github.event.inputs.year }}"
+          [ -n "${{ github.event.inputs.url }}" ] && ARGS="$ARGS --url ${{ github.event.inputs.url }}"
+          [ "${{ github.event.inputs.seed_only }}" = "true" ] && ARGS="$ARGS --seed-only"
+          [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          python -m ingestion.civil_service.run $ARGS
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: civil-service-raw-${{ github.run_id }}
+          path: data/raw/civil_service/
+          retention-days: 365
+          if-no-files-found: ignore

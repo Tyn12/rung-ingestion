@@ -1,0 +1,53 @@
+name: Ingest Local Government Senior Salaries
+
+# Councils publish senior-salary disclosures after the April financial year
+# end — most by July. Quarterly polling is plenty; the job degrades
+# gracefully when URLs aren't yet registered.
+
+on:
+  schedule:
+    - cron: "30 8 20 */3 *"    # 20th of every 3rd month, 08:30 UTC
+  workflow_dispatch:
+    inputs:
+      councils:
+        description: "Space-separated council codes (default: all with URLs)"
+        required: false
+        default: ""
+      year:
+        description: "Financial year ending"
+        required: false
+        default: ""
+      dry_run:
+        description: "Fetch + parse but skip DB write"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run ingestion
+        run: |
+          ARGS=""
+          [ -n "${{ github.event.inputs.councils }}" ] && ARGS="$ARGS --councils ${{ github.event.inputs.councils }}"
+          [ -n "${{ github.event.inputs.year }}" ] && ARGS="$ARGS --year ${{ github.event.inputs.year }}"
+          [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          python -m ingestion.local_gov.run $ARGS
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-gov-raw-${{ github.run_id }}
+          path: data/raw/local_gov/
+          retention-days: 365
+          if-no-files-found: ignore

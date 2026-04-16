@@ -1,0 +1,61 @@
+name: Ingest UCU/UCEA Pay Spine
+
+# UCEA publishes the Single Pay Spine each August (after national pay
+# negotiations). We poll weekly August-October; with --seed-fallback enabled,
+# the job never fails red — it will insert the hand-curated baseline if the
+# current circular isn't registered yet.
+
+on:
+  schedule:
+    - cron: "15 7 * * 3"    # Wednesdays 07:15 UTC
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Pay year starting (August)"
+        required: false
+        default: ""
+      url:
+        description: "Override circular URL (.xlsx or .pdf)"
+        required: false
+        default: ""
+      seed_only:
+        description: "Skip fetch; use hand-curated spine"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      dry_run:
+        description: "Fetch + parse but skip DB write"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run ingestion
+        run: |
+          ARGS="--seed-fallback"
+          [ -n "${{ github.event.inputs.year }}" ] && ARGS="$ARGS --year ${{ github.event.inputs.year }}"
+          [ -n "${{ github.event.inputs.url }}" ] && ARGS="$ARGS --url ${{ github.event.inputs.url }}"
+          [ "${{ github.event.inputs.seed_only }}" = "true" ] && ARGS="$ARGS --seed-only"
+          [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          python -m ingestion.ucu.run $ARGS
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ucu-raw-${{ github.run_id }}
+          path: data/raw/ucu/
+          retention-days: 365
+          if-no-files-found: ignore

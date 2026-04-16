@@ -1,0 +1,30 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Raw + intermediate data (regenerable, can be large)
+data/raw/
+data/staged/
+*.parquet
+*.jsonl
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# CI artifact downloads
+nomis-raw-*/
+reed-raw-*/

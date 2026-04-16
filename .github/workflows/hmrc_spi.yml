@@ -1,0 +1,59 @@
+name: Ingest HMRC Survey of Personal Incomes
+
+# SPI lands annually ~2-3 years after the tax year close. Quarterly polling
+# with --seed-fallback ensures we always have a baseline distribution loaded.
+
+on:
+  schedule:
+    - cron: "30 8 15 */3 *"   # 15th of every 3rd month, 08:30 UTC
+  workflow_dispatch:
+    inputs:
+      tax_year_ending:
+        description: "Tax year ending (e.g. 2022 for TY 2021-22)"
+        required: false
+        default: ""
+      url:
+        description: "Override SPI XLSX URL"
+        required: false
+        default: ""
+      seed_only:
+        description: "Skip fetch; use seeded baseline"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      dry_run:
+        description: "Fetch + parse but skip DB write"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run ingestion
+        run: |
+          ARGS="--seed-fallback"
+          [ -n "${{ github.event.inputs.tax_year_ending }}" ] && ARGS="$ARGS --tax-year-ending ${{ github.event.inputs.tax_year_ending }}"
+          [ -n "${{ github.event.inputs.url }}" ] && ARGS="$ARGS --url ${{ github.event.inputs.url }}"
+          [ "${{ github.event.inputs.seed_only }}" = "true" ] && ARGS="$ARGS --seed-only"
+          [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          python -m ingestion.hmrc_spi.run $ARGS
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hmrc-spi-raw-${{ github.run_id }}
+          path: data/raw/hmrc_spi/
+          retention-days: 365
+          if-no-files-found: ignore
