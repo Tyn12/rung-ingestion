@@ -5,14 +5,13 @@ Usage:
     python -m ingestion.nomis.run --years 2022 2023 2024
     python -m ingestion.nomis.run --dataset NM_30_1
     python -m ingestion.nomis.run --dry-run        # fetch + parse but don't write DB
-    python -m ingestion.nomis.run --from-file path/to/saved.json --dataset NM_99_1
+    python -m ingestion.nomis.run --from-file path/to/saved.csv --dataset NM_99_1
 
 Called by the GitHub Actions workflow on a yearly schedule (post-ASHE release)
 and manually on demand.
 """
 from __future__ import annotations
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -26,7 +25,7 @@ from ingestion.nomis.fetch import (
     fetch_metadata,
 )
 from ingestion.nomis.load import load
-from ingestion.nomis.parse import parse_nomis_json
+from ingestion.nomis.parse import parse_file
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -63,7 +62,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--from-file",
         type=Path,
         default=None,
-        help="Skip fetch; parse this previously downloaded JSON file instead.",
+        help="Skip fetch; parse this previously downloaded CSV file instead.",
     )
     return p
 
@@ -73,7 +72,6 @@ def main(argv: list[str] | None = None) -> int:
     dataset_id = args.dataset
 
     if args.from_file:
-        raw = json.loads(args.from_file.read_text())
         path = args.from_file
         print(f"[nomis:run] Using cached file {path}")
     else:
@@ -85,9 +83,8 @@ def main(argv: list[str] | None = None) -> int:
             years=args.years,
             occupations=args.occupations,
         )
-        raw = json.loads(path.read_text())
 
-    observations = list(parse_nomis_json(raw, dataset_id))
+    observations = parse_file(path, dataset_id)
     print(f"[nomis:run] Parsed {len(observations)} candidate observations.")
 
     if args.dry_run:

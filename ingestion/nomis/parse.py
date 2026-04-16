@@ -1,37 +1,23 @@
-"""Parse raw Nomis ASHE JSON into CompensationObservation records.
+"""Parse Nomis ASHE CSV data into CompensationObservation records.
 
-The Nomis `.data.json` response carries an `obs` array where each entry is a single
-observation indexed by its dimension values. Typical shape:
-
-    {
-      "obs": [
-        {
-          "time": {"value": "2024", "description": "2024"},
-          "geography": {"value": "E12000007", "description": "London"},
-          "sex": {"value": "7", "description": "Full-time"},
-          "item": {"value": "2",   "description": "Median"},
-          "pay": {"value": "7",    "description": "Gross weekly pay (£)"},
-          "occupation": {"value": "2136", "description": "Programmers..."},
-          "obs_value": {"value": 985.40}
-        },
-        ...
-      ]
-    }
-
-Different Nomis datasets return slightly different dimension keys. We normalize
-defensively — any missing dimension becomes None rather than crashing the batch.
+The Nomis `.data.csv` response has flat columns including:
+    DATE_NAME, GEOGRAPHY_CODE, GEOGRAPHY_NAME, SEX_NAME, ITEM_NAME,
+    ITEM_CODE, PAY_NAME, OCCUPATION_CODE, OCCUPATION_NAME, OBS_VALUE,
+    OBS_STATUS_NAME
 
 Item codes we care about:
-    2  → median (percentile=50, but flagged as 'median' in the payload)
+    2  → median (percentile=50)
     3  → mean  (stored as POINT with percentile=None)
-    10, 25, 50, 75, 90 → percentile value directly
+    10, 25, 75, 90 → percentile value directly
 
 We store gross weekly figures as `period=weekly` and let the shared normalizer
 multiply through to annual. This keeps the raw value in the DB for audit trails.
 """
 from __future__ import annotations
+import csv
 import json
 from datetime import date
+from io import StringIO
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -45,12 +31,10 @@ from shared.models import (
 from shared.normalization import NORMALIZATION_VERSION, normalize_to_annual
 
 
-# Map Nomis "item" dimension → (observation_type, percentile)
-# Codes based on the ASHE item codelist. Mean is stored as a POINT because it
-# isn't a percentile; everything else is stored with its percentile number.
+# Map Nomis "ITEM_CODE" → (observation_type, percentile)
 ITEM_CODE_MAP = {
     "2":  (ObservationType.PERCENTILE, 50),   # median
-    "3":  (ObservationType.POINT, None),      # mean
+    "3":  (ObservationType.POINT, None),       # mean
     "10": (ObservationType.PERCENTILE, 10),
     "20": (ObservationType.PERCENTILE, 20),
     "25": (ObservationType.PERCENTILE, 25),
@@ -65,88 +49,70 @@ ITEM_CODE_MAP = {
 }
 
 
-# Pay measure codes → (period, human label). ASHE publishes both weekly and
-# annual across different tables; we tag whichever came back.
-PAY_MEASURE_MAP = {
-    "1": (Period.WEEKLY, "Gross weekly pay"),
-    "7": (Period.WEEKLY, "Gross weekly pay"),
-    "8": (Period.ANNUAL, "Gross annual pay"),
-    "9": (Period.HOURLY, "Gross hourly pay"),
-}
-
-
-def _dim_value(obs: dict, key: str) -> Optional[str]:
-    """Pull the `value` out of a dimension block, tolerating missing keys."""
-    block = obs.get(key)
-    if not block:
+def _parse_year(date_name: str) -> Optional[int]:
+    """Extract year from DATE_NAME like '2024' or 'Apr 2024'."""
+    if not date_name:
         return None
-    if isinstance(block, dict):
-        return str(block.get("value")) if block.get("value") is not None else None
-    return str(block)
+    # Take last 4 digits that look like a year
+    for token in reversed(date_name.split()):
+        token = token.strip()
+        if len(token) == 4 and token.isdigit():
+            y = int(token)
+            if 1990 <= y <= 2100:
+                return y
+    return None
 
 
-def _obs_value(obs: dict) -> Optional[float]:
-    """Nomis nests the numeric value under obs_value.value (sometimes just value)."""
-    v = obs.get("obs_value") or obs.get("value")
-    if isinstance(v, dict):
-        v = v.get("value")
-    if v is None:
+def _safe_float(raw: str) -> Optional[float]:
+    if not raw or raw.strip() in ("", "..", "x", "z", ":", "-", "*"):
         return None
     try:
-        return float(v)
+        return float(raw.strip().replace(",", ""))
     except (TypeError, ValueError):
         return None
 
 
-def _build_reference(
-    dataset_id: str,
-    year: Optional[str],
-    geography: Optional[str],
-    sex: Optional[str],
-    item: Optional[str],
-    pay: Optional[str],
-    occupation: Optional[str],
-) -> str:
-    """Deterministic unique key per observation tuple (idempotent upserts)."""
-    parts = [dataset_id, year or "_", geography or "_", sex or "_", item or "_", pay or "_", occupation or "_"]
-    return ":".join(parts)
-
-
-def parse_nomis_json(raw: dict, dataset_id: str) -> Iterable[CompensationObservation]:
-    """Yield CompensationObservation records from a Nomis `.data.json` response."""
-    observations = raw.get("obs") or []
-    for obs in observations:
-        year = _dim_value(obs, "time") or _dim_value(obs, "date")
-        geography = _dim_value(obs, "geography")
-        sex = _dim_value(obs, "sex")
-        item = _dim_value(obs, "item")
-        pay = _dim_value(obs, "pay")
-        occupation = _dim_value(obs, "occupation")
-        value = _obs_value(obs)
-
+def parse_nomis_csv(csv_text: str, dataset_id: str) -> Iterable[CompensationObservation]:
+    """Yield CompensationObservation records from a Nomis CSV response."""
+    reader = csv.DictReader(StringIO(csv_text))
+    for row in reader:
+        value = _safe_float(row.get("OBS_VALUE", ""))
         if value is None:
-            # Nomis suppresses low-confidence cells with nulls / "x". Skip them.
             continue
 
-        obs_type_info = ITEM_CODE_MAP.get(item)
+        item_code = (row.get("ITEM_CODE") or "").strip()
+        obs_type_info = ITEM_CODE_MAP.get(item_code)
         if not obs_type_info:
-            # Unknown item code — skip rather than miscategorize.
             continue
         obs_type, percentile = obs_type_info
 
-        pay_info = PAY_MEASURE_MAP.get(pay) or (Period.WEEKLY, "Gross weekly pay")
-        period, _ = pay_info
+        geography = (row.get("GEOGRAPHY_CODE") or "").strip() or None
+        occupation = (row.get("OCCUPATION_CODE") or "").strip() or None
+        date_name = (row.get("DATE_NAME") or "").strip()
+        year = _parse_year(date_name)
 
+        # ASHE is published for the April reference period
+        observed_at = date(year, 4, 1) if year else None
+
+        # Build deterministic reference for upserts
+        ref_parts = [
+            dataset_id,
+            str(year) if year else "_",
+            geography or "_",
+            (row.get("SEX_NAME") or "7").strip(),
+            item_code,
+            (row.get("PAY_NAME") or "7").strip()[:20],
+            occupation or "_",
+        ]
+        ref = ":".join(ref_parts)
+
+        # Weekly pay → annual
+        period = Period.WEEKLY
         normalized = normalize_to_annual(value, period.value)
-
-        observed_at = None
-        if year and year.isdigit():
-            # ASHE is published for the April reference period; we anchor to April.
-            observed_at = date(int(year), 4, 1)
 
         yield CompensationObservation(
             source_id=f"nomis_ashe_{dataset_id.lower()}",
-            source_reference=_build_reference(dataset_id, year, geography, sex, item, pay, occupation),
+            source_reference=ref,
             occupation_code=occupation,
             location_code=geography,
             company_ref=None,
@@ -159,25 +125,35 @@ def parse_nomis_json(raw: dict, dataset_id: str) -> Iterable[CompensationObserva
             normalized_annual_amount=normalized,
             normalization_method_version=NORMALIZATION_VERSION,
             currency="GBP",
-            experience_band=ExperienceBand.UNKNOWN,   # ASHE doesn't break out experience
-            contract_type=ContractType.PERMANENT,     # Full-time employees by filter
-            sample_size=None,                         # Only available via separate CV/precision series
+            experience_band=ExperienceBand.UNKNOWN,
+            contract_type=ContractType.PERMANENT,
+            sample_size=None,
             total_comp_annual=None,
             observed_at=observed_at,
-            source_payload=obs,
+            source_payload={
+                "dataset": dataset_id,
+                "date_name": date_name,
+                "geography_name": (row.get("GEOGRAPHY_NAME") or "").strip(),
+                "sex": (row.get("SEX_NAME") or "").strip(),
+                "item": (row.get("ITEM_NAME") or "").strip(),
+                "pay": (row.get("PAY_NAME") or "").strip(),
+                "occupation_name": (row.get("OCCUPATION_NAME") or "").strip(),
+                "obs_status": (row.get("OBS_STATUS_NAME") or "").strip(),
+                "weekly_gbp": value,
+            },
         )
 
 
 def parse_file(path: Path, dataset_id: str) -> list[CompensationObservation]:
-    """Convenience wrapper for `python -m ingestion.nomis.parse path/to/file.json`."""
-    raw = json.loads(path.read_text())
-    return list(parse_nomis_json(raw, dataset_id))
+    """Parse a saved CSV file."""
+    text = path.read_text(encoding="utf-8")
+    return list(parse_nomis_csv(text, dataset_id))
 
 
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 3:
-        print("Usage: python -m ingestion.nomis.parse <dataset_id> <path_to_json>")
+        print("Usage: python -m ingestion.nomis.parse <dataset_id> <path_to_csv>")
         sys.exit(1)
     dataset_id = sys.argv[1]
     records = parse_file(Path(sys.argv[2]), dataset_id)
