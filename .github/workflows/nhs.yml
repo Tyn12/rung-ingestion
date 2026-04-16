@@ -34,8 +34,8 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Run ingestion
         run: |
-          ARGS=""
-          [ -n "${{ github.event.inputs.year }}" ] && ARGS="--year ${{ github.event.inputs.year }}"
+          ARGS="--seed-fallback"
+          [ -n "${{ github.event.inputs.year }}" ] && ARGS="$ARGS --year ${{ github.event.inputs.year }}"
           [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
           python -m ingestion.nhs.run $ARGS
       - if: always()
