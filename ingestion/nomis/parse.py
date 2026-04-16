@@ -72,6 +72,26 @@ def _safe_float(raw: str) -> Optional[float]:
         return None
 
 
+def _classify_pay(pay_name: str) -> Optional[Period]:
+    """Map PAY_NAME to a Period, or None if the row should be skipped.
+
+    ASHE datasets return several pay types including annual, weekly,
+    hourly, and percentage-change rows.  We only ingest monetary values
+    and tag them with the correct period so the normalizer works.
+    """
+    low = pay_name.lower()
+    if "percent" in low or "change" in low:
+        return None          # skip percentage-change rows
+    if "annual" in low:
+        return Period.ANNUAL
+    if "weekly" in low:
+        return Period.WEEKLY
+    if "hourly" in low:
+        return Period.HOURLY
+    # Unknown pay type — skip to be safe
+    return None
+
+
 def parse_nomis_csv(csv_text: str, dataset_id: str) -> Iterable[CompensationObservation]:
     """Yield CompensationObservation records from a Nomis CSV response."""
     reader = csv.DictReader(StringIO(csv_text))
@@ -85,6 +105,12 @@ def parse_nomis_csv(csv_text: str, dataset_id: str) -> Iterable[CompensationObse
         if not obs_type_info:
             continue
         obs_type, percentile = obs_type_info
+
+        # Determine period from PAY_NAME; skip non-monetary rows
+        pay_name = (row.get("PAY_NAME") or "").strip()
+        period = _classify_pay(pay_name)
+        if period is None:
+            continue
 
         geography = (row.get("GEOGRAPHY_CODE") or "").strip() or None
         occupation = (row.get("OCCUPATION_CODE") or "").strip() or None
@@ -101,13 +127,11 @@ def parse_nomis_csv(csv_text: str, dataset_id: str) -> Iterable[CompensationObse
             geography or "_",
             (row.get("SEX_NAME") or "7").strip(),
             item_code,
-            (row.get("PAY_NAME") or "7").strip()[:20],
+            pay_name[:20] or "7",
             occupation or "_",
         ]
         ref = ":".join(ref_parts)
 
-        # Weekly pay → annual
-        period = Period.WEEKLY
         normalized = normalize_to_annual(value, period.value)
 
         yield CompensationObservation(
@@ -139,7 +163,8 @@ def parse_nomis_csv(csv_text: str, dataset_id: str) -> Iterable[CompensationObse
                 "pay": (row.get("PAY_NAME") or "").strip(),
                 "occupation_name": (row.get("OCCUPATION_NAME") or "").strip(),
                 "obs_status": (row.get("OBS_STATUS_NAME") or "").strip(),
-                "weekly_gbp": value,
+                "raw_value": value,
+                "period": period.value,
             },
         )
 
