@@ -28,3 +28,8 @@ data/staged/
 # CI artifact downloads
 nomis-raw-*/
 reed-raw-*/
+.claude/ 
+survey_results_public.csv 
+*.xls 
+*.xlsx 
+"ONS occupation/" 

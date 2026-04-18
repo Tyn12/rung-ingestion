@@ -1,0 +1,28 @@
+title,proposed_soc,proposed_label,confidence,notes,Confirmed_SOC
+Accounts Senior,24,Business/legal professionals,HIGH,Accountancy role - SOC 24 covers accountants/auditors,24
+Architectural Technologist,21,Tech professionals,HIGH,Architecture/engineering professional,21
+Audit Senior,24,Business/legal professionals,HIGH,Auditing role - SOC 24 covers auditors,24
+BD Grad Scheme,71,Sales,MEDIUM,Business Development graduate - could be SOC 35 (business associates) instead?,"2439 (Business, research and administrative professionals n.e.c.)"
+Behaviour Mentor,23,Teaching professionals,HIGH,School-based role supporting pupils,23
+Branch Partner,12,Other managers,MEDIUM,Could be estate agency (SOC 35) or retail management (SOC 12)?,12
+Career Starter Stores,71,Sales,LOW,Aldi entry-level retail - could be SOC 92 (elementary) instead?,"In the UK (SOC2020), the primary occupational code for a general retail worker (sales assistant or cashier) is 7111 (Sales Assistants and Retail Cashiers)"
+Commercial Account Handler,35,Business associates,HIGH,Insurance/business account management,35
+Commercial Graduate Scheme,35,Business associates,MEDIUM,Could span multiple SOC codes depending on actual role,"2439 (Business, research and administrative professionals n.e.c.)"
+Cover Supervisor,23,Teaching professionals,HIGH,School-based role covering teacher absence,23
+Dispensing Optician,22,Health professionals,HIGH,Healthcare professional,22
+Early Years Practitioner,61,Caring services,HIGH,Childcare/early education,61
+Ecologist,21,Tech professionals,HIGH,Science professional,2151 (Conservation professionals
+Entry Level Grad Scheme,35,Business associates,LOW,Generic - could be any SOC. Skip if unsure?,"2439 (Business, research and administrative professionals n.e.c.)"
+Finance Business Partner,24,Business associates,HIGH,Financial/business advisory role,24
+Financial Adviser,24,Business associates,HIGH,Financial advisory - SOC 35 covers financial advisors,24
+HLTA,23,Teaching professionals,HIGH,Higher Level Teaching Assistant (acronym),23
+Paraplanner,35,Business associates,HIGH,Financial planning support role,35
+Residential Conveyancer,24,Business/legal professionals,HIGH,Legal property role,24
+Room Leader,61,Caring services,HIGH,Nursery/childcare room leader,61
+Sales Negotiator,71,Sales,HIGH,Property/estate agency sales,71
+Sales Valuer,71,Sales,HIGH,Property/estate agency valuation,71
+Senior Data Strategist - CRM,35,Business associates,HIGH,Data/marketing strategy role - could be SOC 21 (tech) instead?,35
+Senior Ecologist,21,Tech professionals,HIGH,Science professional,2151 (Conservation professionals
+Senior Paraplanner,24,Business associates,HIGH,Senior financial planning support,24
+Supervisor,1,Manager (generic),MEDIUM,Very generic - could be any sector,1
+Team Leader,1,Manager (generic),MEDIUM,Generic management/leadership role,1
