@@ -913,8 +913,12 @@ def _assemble_distribution(data: PrecomputedData, key: ProfileKey) -> dict:
 
 
 def _assemble_national_benchmark(data: PrecomputedData, key: ProfileKey) -> dict:
-    """National-level percentiles for the same occupation."""
-    return _lookup_pctile(data, key.occupation_code, "_all")
+    """National-level percentiles for the same occupation and experience band."""
+    result = _lookup_pctile(data, key.occupation_code, "_all", key.experience_band)
+    # Fall back to all-bands national if band-specific has no data
+    if result.get("sample_size", 0) == 0:
+        result = _lookup_pctile(data, key.occupation_code, "_all")
+    return result
 
 
 def _assemble_metadata(data: PrecomputedData, key: ProfileKey) -> dict:
