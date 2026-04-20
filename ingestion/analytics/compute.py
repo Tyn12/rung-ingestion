@@ -109,27 +109,40 @@ def compute_confidence(analytics: dict) -> float:
 
 def _build_profile_metadata(conn, key: ProfileKey) -> dict:
     """Resolve human-readable labels for the profile dimensions."""
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        # Occupation label
-        cur.execute(
-            "SELECT label FROM dim_occupation WHERE occupation_code = %s",
-            (key.occupation_code,)
-        )
-        occ_row = cur.fetchone()
+    occ_label = key.occupation_code
+    loc_label = key.location_code
+    is_london = False
 
-        # Location label + is_london flag
-        cur.execute(
-            "SELECT label, is_london FROM dim_location WHERE location_code = %s",
-            (key.location_code,)
-        )
-        loc_row = cur.fetchone()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        if key.occupation_code and key.occupation_code != "_all":
+            cur.execute(
+                "SELECT label FROM dim_occupation WHERE occupation_code = %s",
+                (key.occupation_code,)
+            )
+            occ_row = cur.fetchone()
+            if occ_row:
+                occ_label = occ_row["label"]
+        else:
+            occ_label = "All Occupations"
+
+        if key.location_code and key.location_code != "_all":
+            cur.execute(
+                "SELECT label, is_london FROM dim_location WHERE location_code = %s",
+                (key.location_code,)
+            )
+            loc_row = cur.fetchone()
+            if loc_row:
+                loc_label = loc_row["label"]
+                is_london = bool(loc_row["is_london"])
+        else:
+            loc_label = "United Kingdom"
 
     return {
         "occupation_code": key.occupation_code,
-        "occupation_label": occ_row["label"] if occ_row else key.occupation_code,
+        "occupation_label": occ_label,
         "location_code": key.location_code,
-        "location_label": loc_row["label"] if loc_row else key.location_code,
-        "is_london": bool(loc_row["is_london"]) if loc_row else False,
+        "location_label": loc_label,
+        "is_london": is_london,
         "sector": key.sector,
         "experience_band": key.experience_band,
     }
@@ -186,9 +199,16 @@ def _build_regional_comparison(conn, key: ProfileKey) -> list[dict]:
     Each entry includes the COL index from dim_cost_of_living so the frontend
     can compute COL-adjusted figures without a separate query.
     """
+    occ = key.occupation_code if key.occupation_code != "_all" else None
+
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         # Get all regions that have data for this occupation
-        cur.execute("""
+        occ_clause = "AND co.occupation_code = %s" if occ else ""
+        params: list[Any] = []
+        if occ:
+            params.append(occ)
+
+        cur.execute(f"""
             SELECT DISTINCT co.location_code,
                    dl.label AS location_label,
                    dl.is_london,
@@ -196,10 +216,10 @@ def _build_regional_comparison(conn, key: ProfileKey) -> list[dict]:
             FROM compensation_observations co
             JOIN dim_location dl ON dl.location_code = co.location_code
             LEFT JOIN dim_cost_of_living col ON col.location_code = co.location_code
-            WHERE co.occupation_code = %s
-              AND co.location_code IS NOT NULL
+            WHERE co.location_code IS NOT NULL
+              {occ_clause}
             ORDER BY dl.label
-        """, (key.occupation_code,))
+        """, params)
         regions = cur.fetchall()
 
     result = []
@@ -272,21 +292,32 @@ def _build_trends(conn, key: ProfileKey) -> list[dict]:
 
     Returns an array of {year, p50, sample_size} objects.
     """
+    occ = key.occupation_code if key.occupation_code != "_all" else None
+    loc = key.location_code if key.location_code != "_all" else None
+
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("""
+        occ_clause = "AND occupation_code = %s" if occ else ""
+        loc_clause = "AND location_code = %s" if loc else ""
+        params: list[Any] = []
+        if occ:
+            params.append(occ)
+        if loc:
+            params.append(loc)
+
+        cur.execute(f"""
             SELECT observed_year AS year,
                    PERCENTILE_CONT(0.5) WITHIN GROUP (
                        ORDER BY normalized_annual_amount
                    ) AS p50,
                    COUNT(*) AS sample_size
             FROM compensation_observations
-            WHERE occupation_code = %s
-              AND (location_code = %s OR %s IS NULL)
-              AND normalized_annual_amount IS NOT NULL
+            WHERE normalized_annual_amount IS NOT NULL
               AND normalized_annual_amount > 0
+              {occ_clause}
+              {loc_clause}
             GROUP BY observed_year
             ORDER BY observed_year
-        """, (key.occupation_code, key.location_code, key.location_code))
+        """, params)
         rows = cur.fetchall()
 
     result = []
@@ -307,20 +338,29 @@ def _build_distribution(conn, key: ProfileKey) -> dict:
     """
     bin_width = 5000  # £5k bins
 
+    occ = key.occupation_code if key.occupation_code != "_all" else None
+    loc = key.location_code if key.location_code != "_all" else None
+
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("""
+        occ_clause = "AND occupation_code = %s" if occ else ""
+        loc_clause = "AND location_code = %s" if loc else ""
+        params: list[Any] = [bin_width, bin_width]
+        if occ:
+            params.append(occ)
+        if loc:
+            params.append(loc)
+
+        cur.execute(f"""
             SELECT (FLOOR(normalized_annual_amount / %s) * %s)::INTEGER AS bin_floor,
                    COUNT(*) AS count
             FROM compensation_observations
-            WHERE occupation_code = %s
-              AND (location_code = %s OR %s IS NULL)
-              AND normalized_annual_amount IS NOT NULL
+            WHERE normalized_annual_amount IS NOT NULL
               AND normalized_annual_amount > 0
-              AND observation_type IN ('point', 'range')
+              {occ_clause}
+              {loc_clause}
             GROUP BY bin_floor
             ORDER BY bin_floor
-        """, (bin_width, bin_width,
-              key.occupation_code, key.location_code, key.location_code))
+        """, params)
         rows = cur.fetchall()
 
     bins = [{"floor": row["bin_floor"], "count": row["count"]} for row in rows]
@@ -346,31 +386,52 @@ def _build_national_benchmark(conn, key: ProfileKey) -> dict:
 
 def _build_metadata(conn, key: ProfileKey) -> dict:
     """Data provenance: which sources contributed, data window, freshness."""
+    occ = key.occupation_code if key.occupation_code != "_all" else None
+    loc = key.location_code if key.location_code != "_all" else None
+
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("""
+        occ_clause = "AND co.occupation_code = %s" if occ else ""
+        loc_clause = "AND co.location_code = %s" if loc else ""
+        params1: list[Any] = []
+        if occ:
+            params1.append(occ)
+        if loc:
+            params1.append(loc)
+
+        cur.execute(f"""
             SELECT DISTINCT ds.display_name,
                    ds.confidence_weight
             FROM compensation_observations co
             JOIN dim_source ds ON ds.source_id = co.source_id
-            WHERE co.occupation_code = %s
-              AND (co.location_code = %s OR %s IS NULL)
-        """, (key.occupation_code, key.location_code, key.location_code))
+            WHERE 1=1
+              {occ_clause}
+              {loc_clause}
+        """, params1)
         sources = cur.fetchall()
 
-        cur.execute("""
+        occ_clause2 = "AND occupation_code = %s" if occ else ""
+        loc_clause2 = "AND location_code = %s" if loc else ""
+        params2: list[Any] = []
+        if occ:
+            params2.append(occ)
+        if loc:
+            params2.append(loc)
+
+        cur.execute(f"""
             SELECT MAX(observed_at) AS latest,
                    MIN(observed_at) AS earliest
             FROM compensation_observations
-            WHERE occupation_code = %s
-              AND (location_code = %s OR %s IS NULL)
-        """, (key.occupation_code, key.location_code, key.location_code))
+            WHERE 1=1
+              {occ_clause2}
+              {loc_clause2}
+        """, params2)
         window = cur.fetchone()
 
     return {
         "sources_used": [s["display_name"] for s in sources],
         "source_count": len(sources),
         "avg_confidence_weight": round(
-            sum(s["confidence_weight"] for s in sources) / max(len(sources), 1), 2
+            float(sum(float(s["confidence_weight"]) for s in sources)) / max(len(sources), 1), 2
         ),
         "data_window_start": window["earliest"].isoformat() if window and window["earliest"] else None,
         "data_window_end": window["latest"].isoformat() if window and window["latest"] else None,
@@ -389,31 +450,35 @@ def _query_percentiles(
     sector: Optional[str],
     experience_band: Optional[str],
 ) -> dict:
-    """Compute percentile breakpoints from raw observations.
+    """Compute percentile breakpoints from ALL salary observations for an
+    occupation code — including point, range, and percentile observation types.
 
-    Note: '_all' values are treated as None (no filter) so that profiles
-    with missing dimensions still get broad percentile data.
+    The key insight: every row in compensation_observations has a
+    normalized_annual_amount regardless of observation_type. A percentile
+    observation (e.g. ASHE p25 = £32,000) is still a real salary figure at
+    that point in the distribution. By including ALL observation types we
+    get a much richer pool of data to interpolate percentiles from, rather
+    than silently discarding 80%+ of observations.
 
-    This mirrors the blending logic in the benchmarks engine but is
-    simpler — it uses PERCENTILE_CONT on the raw observations table
-    directly, since we're computing ahead of time and can afford the
-    query cost.
+    Percentiles are computed using PERCENTILE_CONT on the full set of
+    normalized_annual_amount values within the given occupation code.
+    No cross-SOC contamination: SOC 25 data is never used for SOC 24.
 
-    Falls back to compensation_aggregates when raw point observations
-    are sparse.
+    '_all' and 'unknown' sentinel values are treated as None (no filter)
+    so profiles with missing dimensions get broad percentile data.
     """
-    # Normalise '_all' sentinel to None so it acts as "no filter"
+    # Normalise sentinel values to None so they act as "no filter"
     if occupation_code == "_all":
         occupation_code = None
     if location_code == "_all":
         location_code = None
     if sector == "_all":
         sector = None
-    if experience_band == "_all":
+    if experience_band in ("_all", "unknown"):
         experience_band = None
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        # --- Attempt 1: compute from raw point observations ---
+        # Build dynamic WHERE clauses
         occ_clause = "AND occupation_code = %s" if occupation_code else ""
         band_clause = "AND experience_band = %s" if experience_band else ""
         location_clause = "AND location_code = %s" if location_code else ""
@@ -426,10 +491,16 @@ def _query_percentiles(
         if experience_band:
             params.append(experience_band)
 
+        # Query ALL observation types — point, range, AND percentile.
+        # Every row has a normalized_annual_amount; percentile observations
+        # are real salary values at known distribution points. Including
+        # them gives us a much denser dataset to compute from.
         query = f"""
             SELECT
                 COUNT(*) AS sample_size,
                 ROUND(AVG(normalized_annual_amount)::NUMERIC, 0) AS mean,
+                ROUND(MIN(normalized_annual_amount)::NUMERIC, 0) AS min_salary,
+                ROUND(MAX(normalized_annual_amount)::NUMERIC, 0) AS max_salary,
                 ROUND(PERCENTILE_CONT(0.10) WITHIN GROUP (ORDER BY normalized_annual_amount)::NUMERIC, 0) AS p10,
                 ROUND(PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY normalized_annual_amount)::NUMERIC, 0) AS p25,
                 ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY normalized_annual_amount)::NUMERIC, 0) AS p50,
@@ -441,7 +512,6 @@ def _query_percentiles(
               {occ_clause}
               {location_clause}
               {band_clause}
-              AND observation_type IN ('point', 'range')
         """
         cur.execute(query, params)
         row = cur.fetchone()
@@ -454,87 +524,29 @@ def _query_percentiles(
                 "p75": int(row["p75"]) if row["p75"] else None,
                 "p90": int(row["p90"]) if row["p90"] else None,
                 "mean": int(row["mean"]) if row["mean"] else None,
+                "min_salary": int(row["min_salary"]) if row["min_salary"] else None,
+                "max_salary": int(row["max_salary"]) if row["max_salary"] else None,
                 "sample_size": row["sample_size"],
             }
 
-        # --- Attempt 2: fall back to pre-aggregated percentiles ---
-        # These come from percentile-type observations (ASHE) and
-        # compensation_aggregates (user submissions).
-        pctile_map: dict[int, list[float]] = {p: [] for p in PCTILE_POINTS}
-        agg_sample = 0
+        # If even with all observation types we have < MIN_SAMPLE_SIZE,
+        # return whatever we have (even 1 row) with a low-confidence flag
+        # rather than returning nothing.
+        if row and row["sample_size"] and row["sample_size"] > 0:
+            return {
+                "p10": int(row["p10"]) if row["p10"] else None,
+                "p25": int(row["p25"]) if row["p25"] else None,
+                "p50": int(row["p50"]) if row["p50"] else None,
+                "p75": int(row["p75"]) if row["p75"] else None,
+                "p90": int(row["p90"]) if row["p90"] else None,
+                "mean": int(row["mean"]) if row["mean"] else None,
+                "min_salary": int(row["min_salary"]) if row["min_salary"] else None,
+                "max_salary": int(row["max_salary"]) if row["max_salary"] else None,
+                "sample_size": row["sample_size"],
+                "low_confidence": True,
+            }
 
-        # From percentile observations (e.g. ASHE Table 2)
-        params2: list[Any] = [occupation_code]
-        loc_clause2 = ""
-        if location_code:
-            loc_clause2 = "AND location_code = %s"
-            params2.append(location_code)
-
-        cur.execute(f"""
-            SELECT percentile, normalized_annual_amount, sample_size
-            FROM compensation_observations
-            WHERE occupation_code = %s
-              {loc_clause2}
-              AND observation_type = 'percentile'
-              AND percentile IN (10, 25, 50, 75, 90)
-              AND normalized_annual_amount IS NOT NULL
-            ORDER BY observed_year DESC
-            LIMIT 20
-        """, params2)
-
-        for prow in cur.fetchall():
-            p = prow["percentile"]
-            if p in pctile_map:
-                pctile_map[p].append(float(prow["normalized_annual_amount"]))
-                if prow["sample_size"]:
-                    agg_sample = max(agg_sample, prow["sample_size"])
-
-        # From compensation_aggregates
-        agg_params: list[Any] = [occupation_code]
-        agg_loc = ""
-        agg_band = ""
-        if location_code:
-            agg_loc = "AND location_code = %s"
-            agg_params.append(location_code)
-        if experience_band:
-            agg_band = "AND experience_band = %s"
-            agg_params.append(experience_band)
-
-        cur.execute(f"""
-            SELECT p10_annual, p25_annual, median_annual, p75_annual, p90_annual,
-                   mean_annual, contributor_count
-            FROM v_publishable_aggregates
-            WHERE occupation_code = %s
-              {agg_loc}
-              {agg_band}
-            ORDER BY quarter DESC
-            LIMIT 1
-        """, agg_params)
-        agg_row = cur.fetchone()
-
-        if agg_row:
-            for p, col in [(10, "p10_annual"), (25, "p25_annual"),
-                           (50, "median_annual"), (75, "p75_annual"),
-                           (90, "p90_annual")]:
-                if agg_row[col]:
-                    pctile_map[p].append(float(agg_row[col]))
-            agg_sample = max(agg_sample, agg_row["contributor_count"] or 0)
-
-        # Average across sources for each percentile point
-        result: dict[str, Any] = {"sample_size": agg_sample}
-        for p in PCTILE_POINTS:
-            vals = pctile_map[p]
-            result[f"p{p}"] = int(round(sum(vals) / len(vals))) if vals else None
-
-        # Compute mean from available p50 as fallback
-        if result.get("p50"):
-            result["mean"] = result["p50"]  # best available approximation
-
-        # Add point observation count if we had any
-        if row and row["sample_size"]:
-            result["sample_size"] = max(result["sample_size"], row["sample_size"])
-
-        return result
+        return {"sample_size": 0}
 
 
 def _compute_yoy_growth(
@@ -548,11 +560,19 @@ def _compute_yoy_growth(
 
     Returns None if insufficient multi-year data.
     """
+    # Normalise sentinels
+    if occupation_code == "_all":
+        occupation_code = None
+    if location_code == "_all":
+        location_code = None
+
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        params: list[Any] = [occupation_code]
-        loc_clause = ""
+        occ_clause = "AND occupation_code = %s" if occupation_code else ""
+        loc_clause = "AND location_code = %s" if location_code else ""
+        params: list[Any] = []
+        if occupation_code:
+            params.append(occupation_code)
         if location_code:
-            loc_clause = "AND location_code = %s"
             params.append(location_code)
 
         cur.execute(f"""
@@ -561,10 +581,9 @@ def _compute_yoy_growth(
                        ORDER BY normalized_annual_amount
                    ) AS median
             FROM compensation_observations
-            WHERE occupation_code = %s
+            WHERE normalized_annual_amount > 0
+              {occ_clause}
               {loc_clause}
-              AND normalized_annual_amount > 0
-              AND observation_type IN ('point', 'range')
             GROUP BY observed_year
             HAVING COUNT(*) >= %s
             ORDER BY observed_year DESC
