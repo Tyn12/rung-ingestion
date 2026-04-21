@@ -450,19 +450,20 @@ def _query_percentiles(
     sector: Optional[str],
     experience_band: Optional[str],
 ) -> dict:
-    """Compute percentile breakpoints from ALL salary observations for an
-    occupation code — including point, range, and percentile observation types.
+    """Compute percentile breakpoints for a given profile slice.
 
-    The key insight: every row in compensation_observations has a
-    normalized_annual_amount regardless of observation_type. A percentile
-    observation (e.g. ASHE p25 = £32,000) is still a real salary figure at
-    that point in the distribution. By including ALL observation types we
-    get a much richer pool of data to interpolate percentiles from, rather
-    than silently discarding 80%+ of observations.
+    Strategy (two attempts):
 
-    Percentiles are computed using PERCENTILE_CONT on the full set of
-    normalized_annual_amount values within the given occupation code.
-    No cross-SOC contamination: SOC 25 data is never used for SOC 24.
+    Attempt 1 — Compute from individual observations (point + range rows).
+        These represent actual salaries from Reed listings and similar sources.
+        Each row is one job/person, so PERCENTILE_CONT gives true percentiles.
+
+    Attempt 2 — Fall back to pre-computed ASHE percentiles.
+        ASHE stores p10/p25/p50/p75/p90 as separate rows with observation_type
+        = 'percentile'.  These are ALREADY percentiles from a large survey, so
+        we read them directly by their `percentile` column rather than running
+        PERCENTILE_CONT across them (which would compute a meaningless
+        percentile-of-percentiles).
 
     '_all' and 'unknown' sentinel values are treated as None (no filter)
     so profiles with missing dimensions get broad percentile data.
@@ -491,11 +492,104 @@ def _query_percentiles(
         if experience_band:
             params.append(experience_band)
 
-        # Query ALL observation types — point, range, AND percentile.
-        # Every row has a normalized_annual_amount; percentile observations
-        # are real salary values at known distribution points. Including
-        # them gives us a much denser dataset to compute from.
-        query = f"""
+        # ── Attempt 1: PERCENTILE_CONT on point/range observations ──
+        # These are real individual salary observations (e.g. Reed listings).
+        # Excludes 'percentile' observation_type which are pre-computed
+        # aggregate values from ASHE — running PERCENTILE_CONT on those
+        # would produce a percentile-of-percentiles (statistically wrong).
+        query_individual = f"""
+            SELECT
+                COUNT(*) AS sample_size,
+                ROUND(AVG(normalized_annual_amount)::NUMERIC, 0) AS mean,
+                ROUND(MIN(normalized_annual_amount)::NUMERIC, 0) AS min_salary,
+                ROUND(MAX(normalized_annual_amount)::NUMERIC, 0) AS max_salary,
+                ROUND(PERCENTILE_CONT(0.10) WITHIN GROUP (ORDER BY normalized_annual_amount)::NUMERIC, 0) AS p10,
+                ROUND(PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY normalized_annual_amount)::NUMERIC, 0) AS p25,
+                ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY normalized_annual_amount)::NUMERIC, 0) AS p50,
+                ROUND(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY normalized_annual_amount)::NUMERIC, 0) AS p75,
+                ROUND(PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY normalized_annual_amount)::NUMERIC, 0) AS p90
+            FROM compensation_observations
+            WHERE normalized_annual_amount IS NOT NULL
+              AND normalized_annual_amount > 0
+              AND observation_type IN ('point', 'range')
+              {occ_clause}
+              {location_clause}
+              {band_clause}
+        """
+        cur.execute(query_individual, params)
+        row = cur.fetchone()
+
+        if row and row["sample_size"] and row["sample_size"] >= MIN_SAMPLE_SIZE:
+            return _format_percentile_result(row)
+
+        # ── Attempt 2: Read ASHE pre-computed percentiles directly ──
+        # ASHE rows have observation_type='percentile' and a `percentile`
+        # column (10, 25, 50, 75, 90).  We read the value for each
+        # percentile point directly — no PERCENTILE_CONT needed.
+        ashe_query = f"""
+            SELECT percentile,
+                   normalized_annual_amount AS value,
+                   sample_size
+            FROM compensation_observations
+            WHERE normalized_annual_amount IS NOT NULL
+              AND normalized_annual_amount > 0
+              AND observation_type = 'percentile'
+              AND percentile IS NOT NULL
+              {occ_clause}
+              {location_clause}
+              {band_clause}
+            ORDER BY percentile
+        """
+        cur.execute(ashe_query, params)
+        ashe_rows = cur.fetchall()
+
+        if ashe_rows:
+            # Build a lookup: for each standard percentile point, pick the
+            # value from the best source (prefer annual, highest sample_size).
+            # Multiple sources/periods may contribute rows for the same
+            # percentile (e.g. annual + weekly-annualised). We take the
+            # median of available values for each percentile point.
+            from collections import defaultdict
+            pct_values: dict[int, list[float]] = defaultdict(list)
+            total_sample = 0
+            for ar in ashe_rows:
+                pct = int(ar["percentile"])
+                pct_values[pct].append(float(ar["value"]))
+                if ar["sample_size"]:
+                    total_sample = max(total_sample, int(ar["sample_size"]))
+
+            result: dict[str, Any] = {"sample_size": total_sample or len(ashe_rows)}
+
+            # For each standard percentile point, take the median of
+            # available values (handles annual + weekly + hourly sources)
+            import statistics
+            for p in PCTILE_POINTS:
+                vals = pct_values.get(p)
+                if vals:
+                    result[f"p{p}"] = int(round(statistics.median(vals)))
+                else:
+                    result[f"p{p}"] = None
+
+            # Mean: use p50 (ASHE mean is stored as observation_type='point')
+            all_means = []
+            for ar in ashe_rows:
+                all_means.append(float(ar["value"]))
+            result["mean"] = int(round(statistics.mean(all_means))) if all_means else None
+
+            # Min/max from the available percentile range
+            all_vals = [float(ar["value"]) for ar in ashe_rows]
+            result["min_salary"] = int(round(min(all_vals)))
+            result["max_salary"] = int(round(max(all_vals)))
+
+            # Check if we have enough percentile points to be useful
+            filled = sum(1 for p in PCTILE_POINTS if result.get(f"p{p}") is not None)
+            if filled >= 3:
+                return result
+
+        # ── Attempt 3: combine everything as a last resort ──
+        # If we have a handful of individual observations AND some ASHE
+        # data, but neither alone meets MIN_SAMPLE_SIZE, combine them.
+        query_all = f"""
             SELECT
                 COUNT(*) AS sample_size,
                 ROUND(AVG(normalized_annual_amount)::NUMERIC, 0) AS mean,
@@ -513,40 +607,31 @@ def _query_percentiles(
               {location_clause}
               {band_clause}
         """
-        cur.execute(query, params)
+        cur.execute(query_all, params)
         row = cur.fetchone()
 
-        if row and row["sample_size"] and row["sample_size"] >= MIN_SAMPLE_SIZE:
-            return {
-                "p10": int(row["p10"]) if row["p10"] else None,
-                "p25": int(row["p25"]) if row["p25"] else None,
-                "p50": int(row["p50"]) if row["p50"] else None,
-                "p75": int(row["p75"]) if row["p75"] else None,
-                "p90": int(row["p90"]) if row["p90"] else None,
-                "mean": int(row["mean"]) if row["mean"] else None,
-                "min_salary": int(row["min_salary"]) if row["min_salary"] else None,
-                "max_salary": int(row["max_salary"]) if row["max_salary"] else None,
-                "sample_size": row["sample_size"],
-            }
-
-        # If even with all observation types we have < MIN_SAMPLE_SIZE,
-        # return whatever we have (even 1 row) with a low-confidence flag
-        # rather than returning nothing.
         if row and row["sample_size"] and row["sample_size"] > 0:
-            return {
-                "p10": int(row["p10"]) if row["p10"] else None,
-                "p25": int(row["p25"]) if row["p25"] else None,
-                "p50": int(row["p50"]) if row["p50"] else None,
-                "p75": int(row["p75"]) if row["p75"] else None,
-                "p90": int(row["p90"]) if row["p90"] else None,
-                "mean": int(row["mean"]) if row["mean"] else None,
-                "min_salary": int(row["min_salary"]) if row["min_salary"] else None,
-                "max_salary": int(row["max_salary"]) if row["max_salary"] else None,
-                "sample_size": row["sample_size"],
-                "low_confidence": True,
-            }
+            result = _format_percentile_result(row)
+            if row["sample_size"] < MIN_SAMPLE_SIZE:
+                result["low_confidence"] = True
+            return result
 
         return {"sample_size": 0}
+
+
+def _format_percentile_result(row) -> dict:
+    """Format a database row from a PERCENTILE_CONT query into a dict."""
+    return {
+        "p10": int(row["p10"]) if row["p10"] else None,
+        "p25": int(row["p25"]) if row["p25"] else None,
+        "p50": int(row["p50"]) if row["p50"] else None,
+        "p75": int(row["p75"]) if row["p75"] else None,
+        "p90": int(row["p90"]) if row["p90"] else None,
+        "mean": int(row["mean"]) if row["mean"] else None,
+        "min_salary": int(row["min_salary"]) if row["min_salary"] else None,
+        "max_salary": int(row["max_salary"]) if row["max_salary"] else None,
+        "sample_size": row["sample_size"],
+    }
 
 
 def _compute_yoy_growth(

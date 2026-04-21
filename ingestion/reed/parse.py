@@ -11,13 +11,19 @@ Reed's `/search` response returns raw numbers in the advertiser's posted amount.
 Most UK permanent listings post annual figures, but contract / part-time roles
 are commonly hourly or daily. We heuristically classify:
 
-    < 200              → hourly  (e.g. "£22")
-    200  – 2,000        → daily   (e.g. "£450" day rate)
+    < 50               → hourly  (e.g. "£22/hr"; covers min wage to £49/hr)
+    50  – 500           → daily   (e.g. "£100/day" supply teacher, "£450" contractor)
+    500 – 2,000         → daily   (high-end contractor daily rates)
     2,000 – 12,000      → weekly  (rare; treated as weekly)
     >= 12,000          → annual
 
-Anything below the National Minimum Wage implied annual (~£12,000 full-time)
-is treated as hourly/daily rather than assuming a near-zero annual salary.
+The threshold between hourly and daily was moved from £200 to £50 because
+supply teachers (£80-180/day), agency nurses, and trades commonly list daily
+rates below £200. Misclassifying these as hourly inflated them by ~9x
+(×1950 instead of ×220), producing phantom £150k-£390k "salaries".
+
+Title keywords provide an additional override for known daily-rate roles
+(supply teacher, locum, etc.) in the ambiguous £50-199 range.
 
 Raw values go into source_payload so we can retroactively reclassify if needed.
 """
@@ -84,9 +90,50 @@ def _detect_contract_type(listing: dict, period: Period) -> ContractType:
     return ContractType.PERMANENT
 
 
-def _detect_period(value: float) -> Period:
-    if value < 200:
+def _detect_period(value: float, title: str = "") -> Period:
+    """Classify the pay period from the raw salary figure and job title.
+
+    Thresholds are calibrated against UK pay norms:
+      - Hourly:  National Minimum Wage ~£11.44 up to ~£50/hr for specialists.
+      - Daily:   £50–500 covers supply teachers (~£80–180), agency nurses,
+                 trades, and mid-range contractors.
+      - Weekly:  £500–£12,000 (rare in Reed data).
+      - Annual:  ≥ £12,000.
+
+    Title keywords provide an override for the ambiguous £50–199 zone where
+    hourly and daily rates overlap.  Roles known to commonly pay daily rates
+    (supply teaching, locum work, agency nursing, construction trades) are
+    forced to DAILY when the figure falls in that range.
+    """
+    blob = title.lower()
+
+    # ── Title-keyword override for known daily-rate roles ───────────
+    # These roles almost always list daily rates in the £50-500 range.
+    DAILY_TITLE_PATTERNS = (
+        "supply",       # supply teacher / supply staff
+        "day rate",     # explicit day rate
+        "per day",      # explicit per day
+        "locum",        # locum doctor / pharmacist
+        "agency nurse", # agency nursing
+        "cover superv", # cover supervisor
+    )
+    title_suggests_daily = any(pat in blob for pat in DAILY_TITLE_PATTERNS)
+
+    if value < 50:
+        # Below £50 — almost certainly hourly.
+        # UK min wage ~£11.44; most hourly roles £11-40; specialist up to ~£50.
+        # Even if this is actually a daily rate, the damage is small:
+        # £40/day → £40*1950 = £78k (wrong) vs £40*220 = £8.8k (also wrong).
+        # Neither is plausible, and the sanity clamp below will catch it.
         return Period.HOURLY
+    if value < 500:
+        # £50-499 — the ambiguous zone.
+        # Daily rates: supply teachers £80-180, trades £100-250, contractors £300-500.
+        # Hourly rates: specialist IT £50-80, medical £40-60.
+        # Default to DAILY — the asymmetric error cost strongly favours this:
+        #   False positive (hourly→daily): £80/hr * 220 = £17.6k (filters as implausible)
+        #   False negative (daily→hourly): £100/day * 1950 = £195k (catastrophic inflation)
+        return Period.DAILY
     if value < 2_000:
         return Period.DAILY
     if value < MIN_PLAUSIBLE_ANNUAL:
@@ -128,7 +175,8 @@ def parse_listing(listing: dict) -> Optional[CompensationObservation]:
     except (TypeError, ValueError):
         return None
 
-    period = _detect_period(ref_value)
+    title = listing.get("jobTitle") or ""
+    period = _detect_period(ref_value, title)
 
     if min_salary and max_salary and min_salary != max_salary:
         obs_type = ObservationType.RANGE

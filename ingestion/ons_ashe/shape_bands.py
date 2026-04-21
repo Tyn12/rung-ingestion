@@ -110,7 +110,7 @@ def compute_reed_ratios(
             if not ref or ref == 0:
                 continue
             ref = float(ref)
-            if ref < 200:
+            if ref < 50:
                 period = "hourly"
             elif ref < 2000:
                 period = "daily"
