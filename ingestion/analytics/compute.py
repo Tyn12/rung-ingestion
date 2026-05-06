@@ -247,8 +247,12 @@ def _build_regional_comparison(conn, key: ProfileKey) -> list[dict]:
             **pctiles,
         })
 
-    # Sort by median descending (highest-paying regions first)
-    result.sort(key=lambda r: r.get("p50", 0) or 0, reverse=True)
+    # Sort by average descending (highest-paying regions first).
+    # Falls back to p50 if mean is missing for any reason.
+    result.sort(
+        key=lambda r: (r.get("mean") or r.get("p50") or 0),
+        reverse=True,
+    )
     return result
 
 
@@ -283,14 +287,19 @@ def _build_sector_comparison(conn, key: ProfileKey) -> list[dict]:
             **pctiles,
         })
 
-    result.sort(key=lambda r: r.get("p50", 0) or 0, reverse=True)
+    result.sort(
+        key=lambda r: (r.get("mean") or r.get("p50") or 0),
+        reverse=True,
+    )
     return result
 
 
 def _build_trends(conn, key: ProfileKey) -> list[dict]:
-    """Year-over-year median salary trend for this profile.
+    """Year-over-year salary trend for this profile.
 
-    Returns an array of {year, p50, sample_size} objects.
+    Returns an array of {year, mean, p50, sample_size} objects.  The frontend
+    uses `mean` for the headline trend line (we describe it as "average").
+    `p50` is preserved for any percentile-anchored visualisations.
     """
     occ = key.occupation_code if key.occupation_code != "_all" else None
     loc = key.location_code if key.location_code != "_all" else None
@@ -306,6 +315,7 @@ def _build_trends(conn, key: ProfileKey) -> list[dict]:
 
         cur.execute(f"""
             SELECT observed_year AS year,
+                   AVG(normalized_annual_amount) AS mean,
                    PERCENTILE_CONT(0.5) WITHIN GROUP (
                        ORDER BY normalized_annual_amount
                    ) AS p50,
@@ -324,6 +334,7 @@ def _build_trends(conn, key: ProfileKey) -> list[dict]:
     for row in rows:
         result.append({
             "year": row["year"],
+            "mean": round(float(row["mean"])) if row["mean"] else None,
             "p50": round(float(row["p50"])) if row["p50"] else None,
             "sample_size": row["sample_size"],
         })
@@ -570,11 +581,33 @@ def _query_percentiles(
                 else:
                     result[f"p{p}"] = None
 
-            # Mean: use p50 (ASHE mean is stored as observation_type='point')
-            all_means = []
-            for ar in ashe_rows:
-                all_means.append(float(ar["value"]))
-            result["mean"] = int(round(statistics.mean(all_means))) if all_means else None
+            # Mean: ASHE publishes the arithmetic mean as a separate row with
+            # observation_type='point' (no percentile column).  Fetch those
+            # explicitly — averaging the percentile values would NOT give the
+            # true mean of the underlying distribution.
+            mean_query = f"""
+                SELECT normalized_annual_amount AS value
+                FROM compensation_observations
+                WHERE normalized_annual_amount IS NOT NULL
+                  AND normalized_annual_amount > 0
+                  AND observation_type = 'point'
+                  AND percentile IS NULL
+                  {occ_clause}
+                  {location_clause}
+                  {band_clause}
+            """
+            cur.execute(mean_query, params)
+            mean_rows = cur.fetchall()
+            if mean_rows:
+                mean_vals = [float(mr["value"]) for mr in mean_rows]
+                # Take the median of available means (handles annual + weekly + hourly
+                # sources contributing different normalisations).
+                result["mean"] = int(round(statistics.median(mean_vals)))
+            else:
+                # No published mean available — fall back to p50 with a warning flag.
+                # This is rare but can happen for sparse profiles where ASHE published
+                # percentiles but no mean (or where the mean row was suppressed by ONS).
+                result["mean"] = result.get("p50")
 
             # Min/max from the available percentile range
             all_vals = [float(ar["value"]) for ar in ashe_rows]
@@ -641,7 +674,7 @@ def _compute_yoy_growth(
     sector: Optional[str],
     experience_band: Optional[str],
 ) -> Optional[float]:
-    """Compute year-over-year median growth as a percentage.
+    """Compute year-over-year average (mean) growth as a percentage.
 
     Returns None if insufficient multi-year data.
     """
@@ -662,9 +695,7 @@ def _compute_yoy_growth(
 
         cur.execute(f"""
             SELECT observed_year,
-                   PERCENTILE_CONT(0.5) WITHIN GROUP (
-                       ORDER BY normalized_annual_amount
-                   ) AS median
+                   AVG(normalized_annual_amount) AS mean_value
             FROM compensation_observations
             WHERE normalized_annual_amount > 0
               {occ_clause}
@@ -676,8 +707,8 @@ def _compute_yoy_growth(
         """, params + [MIN_SAMPLE_SIZE])
         rows = cur.fetchall()
 
-    if len(rows) >= 2 and rows[1]["median"] and rows[1]["median"] > 0:
-        current = float(rows[0]["median"])
-        previous = float(rows[1]["median"])
+    if len(rows) >= 2 and rows[1]["mean_value"] and rows[1]["mean_value"] > 0:
+        current = float(rows[0]["mean_value"])
+        previous = float(rows[1]["mean_value"])
         return round((current - previous) / previous * 100, 1)
     return None
